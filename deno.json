@@ -9,14 +9,19 @@
     "useTabs": false
   },
   "imports": {
-    "deno-dom": "https://deno.land/x/deno_dom@v0.1.46/deno-dom-wasm.ts",
+    "deno-dom": "https://deno.land/x/deno_dom@v0.1.49/deno-dom-wasm.ts",
+    "defuddle": "npm:defuddle@latest",
     "readability": "npm:@mozilla/readability@0.5.0",
-    "turndown": "npm:turndown@7.2.0",
-    "turndownPluginGfm": "npm:@joplin/turndown-plugin-gfm@1.0.56"
+    "turndown": "https://cdn.skypack.dev/turndown",
+    "turndownPluginGfm": "https://cdn.skypack.dev/turndown-plugin-gfm",
+    "google-news-link-decode": "npm:google_news_link_decode",
+    "strategies/": "./src/strategies/"
   },
   "lint": {
     "rules": {
-      "tags": ["recommended"],
+      "tags": [
+        "recommended"
+      ],
       "include": [
         "no-external-import",
         "camelcase",
