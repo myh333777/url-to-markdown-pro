@@ -1,198 +1,36 @@
 import { indexHtml } from "./src/index-template.ts";
-console.log("[Init] Starting url-to-markdown v2.1.0");
+console.log("[Init] Starting url-to-markdown v2.5.0");
+
+import { McpServer } from "npm:@modelcontextprotocol/sdk@1.11.0/server/mcp.js";
+import { registerTools } from "./src/mcp/tools.ts";
 import {
-    generateJsonData,
-    generateMarkdownText,
-} from "./src/html-to-markdown.ts";
+    createSSEResponse,
+    DenoSSETransport,
+    handleSSEMessage,
+} from "./src/mcp/deno-sse.ts";
+import {
+    handleConversion,
+    parseFormOptions,
+    parseQueryOptions,
+    getCacheSize,
+} from "./src/core/conversion.ts";
 import {
     addCorsHeaders,
     downloadHeaders,
-    fetchHtmlWithStrategies,
     generateFilename,
 } from "./src/utils.ts";
-import type { Strategy } from "./src/strategies/mod.ts";
-import { extractFromJsonLd } from "./src/jsonld.ts";
 
-// ============== URL Cache ==============
-const urlCache = new Map<string, { data: CacheEntry; timestamp: number }>();
-const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+// MCP Server instances per session
+const mcpServers = new Map<string, McpServer>();
 
-interface CacheEntry {
-    content: string;
-    strategy: string;
-    contentType: string;
-    title?: string;
-}
-
-function getCached(url: string): CacheEntry | null {
-    const entry = urlCache.get(url);
-    if (!entry) return null;
-
-    if (Date.now() - entry.timestamp > CACHE_TTL) {
-        urlCache.delete(url);
-        return null;
-    }
-
-    console.log(`[Cache] Hit for: ${url}`);
-    return entry.data;
-}
-
-function setCache(url: string, data: CacheEntry): void {
-    // Limit cache size to 100 entries
-    if (urlCache.size >= 100) {
-        const oldest = urlCache.keys().next().value;
-        if (oldest) urlCache.delete(oldest);
-    }
-    urlCache.set(url, { data, timestamp: Date.now() });
-}
-
-// ============== Options ==============
-interface ConversionOptions {
-    bypass: boolean;
-    preserveImages: boolean;
-    strategy?: Strategy;
-    download: boolean;
-    jsonFormat: boolean;
-    useCache: boolean;
-}
-
-interface ConversionResult {
-    content: string;
-    strategy: string;
-    contentType: string;
-    elapsed: number;
-    fromCache: boolean;
-    title?: string;
-}
-
-function parseOptions(formData: FormData): ConversionOptions {
-    return {
-        bypass: !!formData.get("bypass"),
-        preserveImages: formData.get("images") !== "false", // Default true
-        strategy: formData.get("strategy") as Strategy | undefined,
-        download: !!formData.get("download"),
-        jsonFormat: !!formData.get("json"),
-        useCache: formData.get("cache") !== "false", // Default true
-    };
-}
-
-async function handleConversion(url: string, options: ConversionOptions): Promise<ConversionResult> {
-    const startTime = Date.now();
-    const { bypass, preserveImages, strategy, jsonFormat, useCache } = options;
-
-    // Check cache first
-    if (useCache) {
-        const cached = getCached(url);
-        if (cached) {
-            return {
-                ...cached,
-                elapsed: Date.now() - startTime,
-                fromCache: true,
-            };
-        }
-    }
-
-    // Fetch content with strategies
-    const fetchResult = await fetchHtmlWithStrategies(url, {
-        bypass,
-        strategy,
+function createMcpServerForSession(sessionId: string): McpServer {
+    const server = new McpServer({
+        name: "url-to-markdown",
+        version: "2.5.0",
     });
-
-    if (!fetchResult.success) {
-        throw new Error(fetchResult.error || "Failed to fetch content");
-    }
-
-    let result: CacheEntry;
-
-    // If Jina returned markdown directly, use it
-    if (fetchResult.markdown) {
-        if (jsonFormat) {
-            const jsonData = {
-                url,
-                title: "Extracted Content",
-                date: new Date().toISOString(),
-                content: fetchResult.markdown,
-                strategy: fetchResult.strategy,
-                elapsed: fetchResult.elapsed,
-            };
-            result = {
-                content: JSON.stringify(jsonData, null, 2),
-                strategy: fetchResult.strategy,
-                contentType: "application/json",
-            };
-        } else {
-            result = {
-                content: fetchResult.markdown,
-                strategy: fetchResult.strategy,
-                contentType: "text/plain; charset=utf-8",
-            };
-        }
-    } else if (fetchResult.html) {
-        // Try JSON-LD extraction first
-        const jsonLd = extractFromJsonLd(fetchResult.html);
-
-        if (jsonLd && jsonLd.content.length > 500) {
-            console.log(`[JSON-LD] Using structured data for: ${url}`);
-
-            let markdown = `# ${jsonLd.title}\n\n`;
-            if (jsonLd.author) {
-                markdown += `*By ${jsonLd.author}*\n\n`;
-            }
-            markdown += jsonLd.content;
-
-            if (jsonFormat) {
-                const jsonData = {
-                    url,
-                    title: jsonLd.title,
-                    date: jsonLd.date || new Date().toISOString(),
-                    content: markdown,
-                    strategy: fetchResult.strategy,
-                    author: jsonLd.author,
-                };
-                result = {
-                    content: JSON.stringify(jsonData, null, 2),
-                    strategy: fetchResult.strategy,
-                    contentType: "application/json",
-                    title: jsonLd.title,
-                };
-            } else {
-                result = {
-                    content: markdown,
-                    strategy: fetchResult.strategy,
-                    contentType: "text/plain; charset=utf-8",
-                    title: jsonLd.title,
-                };
-            }
-        } else {
-            // Fallback to Readability + Turndown
-            if (jsonFormat) {
-                result = {
-                    content: generateJsonData(fetchResult.html, url, fetchResult.strategy, preserveImages),
-                    strategy: fetchResult.strategy,
-                    contentType: "application/json",
-                };
-            } else {
-                result = {
-                    content: generateMarkdownText(fetchResult.html, preserveImages),
-                    strategy: fetchResult.strategy,
-                    contentType: "text/plain; charset=utf-8",
-                };
-            }
-        }
-    } else {
-        throw new Error("No content received from fetch");
-    }
-
-    // Save to cache
-    if (useCache) {
-        setCache(url, result);
-    }
-
-    return {
-        ...result,
-        elapsed: Date.now() - startTime,
-        fromCache: false,
-    };
+    registerTools(server);
+    mcpServers.set(sessionId, server);
+    return server;
 }
 
 Deno.serve(async (request: Request) => {
@@ -206,7 +44,7 @@ Deno.serve(async (request: Request) => {
                     JSON.stringify({
                         status: "healthy",
                         service: "url-to-markdown",
-                        version: "2.4.13",
+                        version: "2.5.0",
                         features: [
                             "parallel_fetch",
                             "json_ld",
@@ -216,11 +54,32 @@ Deno.serve(async (request: Request) => {
                             "multi_strategy",
                             "spa_check",
                             "exa",
+                            "mcp_sse",
                         ],
-                        cacheSize: urlCache.size,
+                        cacheSize: getCacheSize(),
+                        mcpSessions: mcpServers.size,
                     }),
                     { headers: { "content-type": "application/json" } }
                 );
+            }
+
+            // MCP SSE endpoint - establish SSE connection
+            if (url.pathname === "/mcp/sse" || url.pathname === "/sse") {
+                console.log("[MCP] New SSE connection request");
+
+                const { response, sessionId } = createSSEResponse("/mcp/message");
+
+                // Create MCP server and connect via custom transport
+                const server = createMcpServerForSession(sessionId);
+                const transport = new DenoSSETransport(sessionId);
+
+                // Connect server (this sets up message handling)
+                server.connect(transport).catch((error) => {
+                    console.error("[MCP] Connection error:", error);
+                });
+
+                console.log(`[MCP] SSE session created: ${sessionId}`);
+                return response;
             }
 
             // Handle API GET requests with query params
@@ -234,15 +93,7 @@ Deno.serve(async (request: Request) => {
                 }
 
                 try {
-                    const options: ConversionOptions = {
-                        bypass: url.searchParams.get("bypass") === "true",
-                        preserveImages: url.searchParams.get("images") !== "false",
-                        strategy: url.searchParams.get("strategy") as Strategy | undefined,
-                        download: false,
-                        jsonFormat: url.searchParams.get("format") === "json",
-                        useCache: url.searchParams.get("cache") !== "false",
-                    };
-
+                    const options = parseQueryOptions(url.searchParams);
                     const result = await handleConversion(targetUrl, options);
                     const headers = new Headers({ "content-type": result.contentType });
                     addCorsHeaders(headers);
@@ -252,8 +103,9 @@ Deno.serve(async (request: Request) => {
 
                     return new Response(result.content, { headers });
                 } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
                     return new Response(
-                        JSON.stringify({ error: error.message }),
+                        JSON.stringify({ error: message }),
                         { status: 500, headers: addCorsHeaders(new Headers({ "content-type": "application/json" })) }
                     );
                 }
@@ -268,6 +120,47 @@ Deno.serve(async (request: Request) => {
         }
 
         case "POST": {
+            // MCP message endpoint
+            if (url.pathname === "/mcp/message" || url.pathname === "/message") {
+                const sessionId = url.searchParams.get("sessionId") || request.headers.get("X-Session-Id");
+
+                if (!sessionId) {
+                    return new Response(
+                        JSON.stringify({ error: "Missing sessionId" }),
+                        { status: 400, headers: { "content-type": "application/json" } }
+                    );
+                }
+
+                if (!mcpServers.has(sessionId)) {
+                    return new Response(
+                        JSON.stringify({ error: "Session not found. Please reconnect to /mcp/sse" }),
+                        { status: 404, headers: { "content-type": "application/json" } }
+                    );
+                }
+
+                try {
+                    const body = await request.text();
+                    const result = await handleSSEMessage(sessionId, body);
+
+                    if (!result.handled) {
+                        return new Response(
+                            JSON.stringify({ error: result.error }),
+                            { status: 400, headers: { "content-type": "application/json" } }
+                        );
+                    }
+
+                    return new Response(null, { status: 202 });
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    console.error("[MCP] Message handling error:", message);
+                    return new Response(
+                        JSON.stringify({ error: message }),
+                        { status: 500, headers: { "content-type": "application/json" } }
+                    );
+                }
+            }
+
+            // Original form POST handling
             try {
                 const formData = await request.formData();
                 const targetUrl = formData.get("url") as string;
@@ -276,7 +169,7 @@ Deno.serve(async (request: Request) => {
                     return new Response("Missing URL parameter", { status: 400 });
                 }
 
-                const options = parseOptions(formData);
+                const options = parseFormOptions(formData);
                 const result = await handleConversion(targetUrl, options);
 
                 const headers = new Headers();
@@ -293,9 +186,10 @@ Deno.serve(async (request: Request) => {
 
                 return new Response(result.content, { headers });
             } catch (error) {
-                console.error("Error processing request:", error);
+                const message = error instanceof Error ? error.message : String(error);
+                console.error("Error processing request:", message);
                 return new Response(
-                    `Error processing request: ${error.message}`,
+                    `Error processing request: ${message}`,
                     {
                         status: 500,
                         headers: addCorsHeaders(new Headers()),

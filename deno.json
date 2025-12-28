@@ -1,6 +1,7 @@
 {
   "tasks": {
-    "dev": "deno run --allow-net --watch main.ts"
+    "dev": "deno run --allow-net --watch main.ts",
+    "mcp": "deno run --allow-net mcp.ts"
   },
   "compilerOptions": {
     "strict": true
@@ -9,6 +10,7 @@
     "useTabs": false
   },
   "imports": {
+    "@modelcontextprotocol/sdk/": "npm:@modelcontextprotocol/sdk@1.11.0/",
     "deno-dom": "https://deno.land/x/deno_dom@v0.1.49/deno-dom-wasm.ts",
     "defuddle": "npm:defuddle@latest",
     "readability": "npm:@mozilla/readability@0.5.0",

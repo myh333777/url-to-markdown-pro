@@ -404,6 +404,22 @@ const indexHtml = `
                         <li><code>format</code> - Output format (json/text)</li>
                     </ul>
                 </div>
+
+                <div class="api-section">
+                    <h3>🤖 MCP Integration <span class="badge badge-new">NEW</span></h3>
+                    <p>Connect with Claude CLI, OpenAI Agents, or any MCP-compatible AI client:</p>
+                    <pre><code>claude mcp add --transport sse url2md https://url2md-pro.deno.dev/mcp/sse</code></pre>
+                    <p><strong>Available Tools:</strong></p>
+                    <ul>
+                        <li><code>fetch_url</code> - Fetch single URL and convert to Markdown</li>
+                        <li><code>fetch_urls</code> - Batch fetch multiple URLs (max 10)</li>
+                    </ul>
+                    <p><strong>SSE Endpoints:</strong></p>
+                    <ul>
+                        <li><code>GET /mcp/sse</code> - Establish SSE connection</li>
+                        <li><code>POST /mcp/message?sessionId=...</code> - Send MCP messages</li>
+                    </ul>
+                </div>
             </article>
         </main>
 
