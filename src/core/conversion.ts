@@ -13,9 +13,9 @@ import {
 import type { Strategy } from "../strategies/mod.ts";
 import { extractFromJsonLd } from "../jsonld.ts";
 
-// ============== URL Cache ==============
+// ============== URL Cache (DISABLED) ==============
+// Cache is disabled per user request
 const urlCache = new Map<string, { data: CacheEntry; timestamp: number }>();
-const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
 export interface CacheEntry {
     content: string;
@@ -24,30 +24,17 @@ export interface CacheEntry {
     title?: string;
 }
 
-export function getCached(url: string): CacheEntry | null {
-    const entry = urlCache.get(url);
-    if (!entry) return null;
-
-    if (Date.now() - entry.timestamp > CACHE_TTL) {
-        urlCache.delete(url);
-        return null;
-    }
-
-    console.log(`[Cache] Hit for: ${url}`);
-    return entry.data;
+export function getCached(_url: string): CacheEntry | null {
+    // Cache disabled - always return null
+    return null;
 }
 
-export function setCache(url: string, data: CacheEntry): void {
-    // Limit cache size to 100 entries
-    if (urlCache.size >= 100) {
-        const oldest = urlCache.keys().next().value;
-        if (oldest) urlCache.delete(oldest);
-    }
-    urlCache.set(url, { data, timestamp: Date.now() });
+export function setCache(_url: string, _data: CacheEntry): void {
+    // Cache disabled - do nothing
 }
 
 export function getCacheSize(): number {
-    return urlCache.size;
+    return 0;
 }
 
 // ============== Options ==============
