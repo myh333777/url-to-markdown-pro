@@ -9,6 +9,10 @@ import {
     handleSSEMessage,
 } from "./src/mcp/deno-sse.ts";
 import {
+    handleStreamableRequest,
+    getStreamableSessionCount,
+} from "./src/mcp/streamable-http.ts";
+import {
     handleConversion,
     parseFormOptions,
     parseQueryOptions,
@@ -55,6 +59,7 @@ Deno.serve(async (request: Request) => {
                             "spa_check",
                             "exa",
                             "mcp_sse",
+                            "mcp_streamable_http",
                         ],
                         cacheSize: getCacheSize(),
                         mcpSessions: mcpServers.size,
@@ -120,7 +125,12 @@ Deno.serve(async (request: Request) => {
         }
 
         case "POST": {
-            // MCP message endpoint
+            // MCP Streamable HTTP endpoint (recommended)
+            if (url.pathname === "/mcp") {
+                return handleStreamableRequest(request);
+            }
+
+            // MCP SSE message endpoint (legacy)
             if (url.pathname === "/mcp/message" || url.pathname === "/message") {
                 const sessionId = url.searchParams.get("sessionId") || request.headers.get("X-Session-Id");
 
