@@ -169,7 +169,7 @@ export async function handleConversion(url: string, options: ConversionOptions):
                 };
             } else {
                 result = {
-                    content: generateMarkdownText(fetchResult.html, preserveImages),
+                    content: generateMarkdownText(fetchResult.html, preserveImages, url),
                     strategy: fetchResult.strategy,
                     contentType: "text/plain; charset=utf-8",
                 };

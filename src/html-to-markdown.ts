@@ -15,6 +15,46 @@ import { Readability } from "readability";
 import TurndownService from "turndown";
 import turndownPluginGfm from "turndownPluginGfm";
 
+/**
+ * Resolve a URL (relative or absolute) against a base URL
+ */
+function resolveUrl(src: string, baseUrl?: string): string {
+    if (!src || !baseUrl) return src;
+
+    // Already absolute URL
+    if (src.startsWith("http://") || src.startsWith("https://") || src.startsWith("//")) {
+        // Handle protocol-relative URLs
+        if (src.startsWith("//")) {
+            try {
+                const base = new URL(baseUrl);
+                return `${base.protocol}${src}`;
+            } catch {
+                return `https:${src}`;
+            }
+        }
+        return src;
+    }
+
+    // Data URLs or other schemes - return as-is
+    if (src.includes(":")) return src;
+
+    try {
+        const base = new URL(baseUrl);
+
+        // Absolute path (starts with /)
+        if (src.startsWith("/")) {
+            return `${base.origin}${src}`;
+        }
+
+        // Relative path - resolve against base URL
+        const baseDir = base.pathname.substring(0, base.pathname.lastIndexOf("/") + 1);
+        return `${base.origin}${baseDir}${src}`;
+    } catch {
+        // If URL parsing fails, return original
+        return src;
+    }
+}
+
 interface JSONResponse {
     url: string;
     title: string;
@@ -48,8 +88,10 @@ const turndownOptions: TurndownService.Options = {
 
 /**
  * Create Turndown service with image preservation
+ * @param preserveImages - Whether to preserve images in output
+ * @param baseUrl - Base URL for resolving relative image paths
  */
-function createTurndownService(preserveImages = true): TurndownService {
+function createTurndownService(preserveImages = true, baseUrl?: string): TurndownService {
     const service = new TurndownService(turndownOptions);
     // service.use(turndownPluginGfm.gfm); // Disabled due to isCodeBlock_ error
 
@@ -70,11 +112,14 @@ function createTurndownService(preserveImages = true): TurndownService {
                 // Skip base64 placeholder images
                 if (!src || src.startsWith("data:")) return "";
 
+                // Resolve relative URLs to absolute
+                const absoluteSrc = resolveUrl(src, baseUrl);
+
                 // Build markdown image syntax
                 if (title && title !== alt) {
-                    return `![${alt}](${src} "${title}")`;
+                    return `![${alt}](${absoluteSrc} "${title}")`;
                 }
-                return `![${alt}](${src})`;
+                return `![${alt}](${absoluteSrc})`;
             },
         });
 
@@ -88,10 +133,18 @@ function createTurndownService(preserveImages = true): TurndownService {
 
                 if (!img) return content;
 
-                const src = img.getAttribute("src") || "";
-                const alt = figcaption?.textContent || img.getAttribute("alt") || "image";
+                // Priority: data-src > data-lazy-src > src (for lazy-loaded images in figures)
+                const src = img.getAttribute("data-src")
+                    || img.getAttribute("data-lazy-src")
+                    || img.getAttribute("src")
+                    || "";
 
-                return `\n\n![${alt}](${src})\n\n`;
+                if (!src || src.startsWith("data:")) return content;
+
+                const alt = figcaption?.textContent || img.getAttribute("alt") || "image";
+                const absoluteSrc = resolveUrl(src, baseUrl);
+
+                return `\n\n![${alt}](${absoluteSrc})\n\n`;
             },
         });
     } else {
@@ -155,16 +208,19 @@ const extractArticleContent = (
 
 /**
  * Convert HTML to Markdown
+ * @param html - HTML content to convert
+ * @param preserveImages - Whether to preserve images
+ * @param baseUrl - Base URL for resolving relative image paths
  */
-const htmlTextToMarkdown = (html: string, preserveImages = true): string => {
+const htmlTextToMarkdown = (html: string, preserveImages = true, baseUrl?: string): string => {
     // Polyfill DOMParser for Turndown in Deno environment
     if (!globalThis.DOMParser) {
         // @ts-ignore - assigning to global
         globalThis.DOMParser = DOMParser;
     }
 
-    // Convert to Markdown
-    const turndownService = createTurndownService(preserveImages);
+    // Convert to Markdown with base URL for resolving relative paths
+    const turndownService = createTurndownService(preserveImages, baseUrl);
 
     // Explicitly parse to DOM and pass the node to Turndown
     // This combined with global polyfills should work in Deno Deploy
@@ -178,14 +234,18 @@ const htmlTextToMarkdown = (html: string, preserveImages = true): string => {
 
 /**
  * Generate Markdown from HTML text
+ * @param htmlText - Full HTML page content
+ * @param preserveImages - Whether to preserve images
+ * @param baseUrl - Base URL for resolving relative image paths
  */
 const generateMarkdownText = (
     htmlText: string,
-    preserveImages = true
+    preserveImages = true,
+    baseUrl?: string
 ): string => {
     const document = parseHtml(htmlText);
     const { content, title, author } = extractArticleContent(document);
-    const markdownText = htmlTextToMarkdown(content, preserveImages);
+    const markdownText = htmlTextToMarkdown(content, preserveImages, baseUrl);
 
     let result = `# ${title}\n\n`;
     if (author) {
@@ -198,6 +258,10 @@ const generateMarkdownText = (
 
 /**
  * Generate JSON response from HTML text
+ * @param htmlText - Full HTML page content
+ * @param url - Original URL (used for both output and resolving relative paths)
+ * @param strategy - Fetch strategy used
+ * @param preserveImages - Whether to preserve images
  */
 const generateJsonData = (
     htmlText: string,
@@ -207,7 +271,8 @@ const generateJsonData = (
 ): string => {
     const document = parseHtml(htmlText);
     const { content, title, author } = extractArticleContent(document);
-    const markdownText = htmlTextToMarkdown(content, preserveImages);
+    // Use url as baseUrl to resolve relative image paths
+    const markdownText = htmlTextToMarkdown(content, preserveImages, url);
 
     let markdownContent = `# ${title}\n\n`;
     if (author) {

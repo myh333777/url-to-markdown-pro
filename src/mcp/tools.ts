@@ -18,7 +18,7 @@ export function registerTools(server: McpServer): void {
         "Fetch a URL and convert its content to Markdown. Supports paywall bypass strategies.",
         {
             url: z.string().url().describe("The URL to fetch and convert to Markdown"),
-            bypass: z.boolean().optional().default(false).describe("Enable paywall bypass strategies"),
+            bypass: z.boolean().optional().default(true).describe("Enable automatic multi-strategy fetch for best results (recommended)"),
             preserveImages: z.boolean().optional().default(true).describe("Preserve images in the Markdown output"),
             strategy: z.enum(["direct", "googlebot", "facebookbot", "bingbot", "archive", "12ft", "jina", "exa"]).optional().describe("Specific fetch strategy to use"),
         },
@@ -70,7 +70,7 @@ export function registerTools(server: McpServer): void {
         "Fetch multiple URLs and convert their content to Markdown. Returns results for each URL.",
         {
             urls: z.array(z.string().url()).min(1).max(10).describe("Array of URLs to fetch (max 10)"),
-            bypass: z.boolean().optional().default(false).describe("Enable paywall bypass strategies"),
+            bypass: z.boolean().optional().default(true).describe("Enable automatic multi-strategy fetch for best results (recommended)"),
             preserveImages: z.boolean().optional().default(true).describe("Preserve images in the Markdown output"),
         },
         async ({ urls, bypass, preserveImages }) => {
