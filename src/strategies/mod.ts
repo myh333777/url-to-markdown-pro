@@ -367,7 +367,21 @@ export async function fetchWithStrategies(
         const result = await fetchDirect(url);
         attempts.push({ strategy: "direct", error: result.error });
 
-        return createResult(result, "direct", attempts, startTime);
+        // Check if direct result is a Google error page - if so, force bypass mode
+        if (result.success && result.html) {
+            if (isGoogleErrorPage(result.html) || isBlocked(result.html)) {
+                console.log(`[Fetch] Direct returned Google error/blocked page, forcing bypass mode...`);
+                bypass = true;
+            } else {
+                return createResult(result, "direct", attempts, startTime);
+            }
+        } else if (!result.success) {
+            // Direct failed, try bypass mode
+            console.log(`[Fetch] Direct failed, trying bypass mode...`);
+            bypass = true;
+        } else {
+            return createResult(result, "direct", attempts, startTime);
+        }
     }
 
     // 1. Parallel race for bot strategies
