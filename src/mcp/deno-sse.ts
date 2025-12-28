@@ -12,9 +12,13 @@ export interface DenoSSESession {
     messageQueue: JSONRPCMessage[];
     onMessage?: (message: JSONRPCMessage) => Promise<void>;
     closed: boolean;
+    heartbeatTimer?: number;  // Heartbeat timer ID
 }
 
 const sessions = new Map<string, DenoSSESession>();
+
+// Heartbeat interval (25 seconds - slightly less than typical 30s timeout)
+const HEARTBEAT_INTERVAL = 25000;
 
 /**
  * Create SSE response for initial connection
@@ -26,21 +30,38 @@ export function createSSEResponse(messageEndpoint: string): { response: Response
     const stream = new ReadableStream<Uint8Array>({
         start(controller) {
             // Store session
-            sessions.set(sessionId, {
+            const session: DenoSSESession = {
                 id: sessionId,
                 controller,
                 messageQueue: [],
                 closed: false,
-            });
+            };
+            sessions.set(sessionId, session);
 
             // Send endpoint event (MCP protocol requirement)
             const endpointData = `${messageEndpoint}?sessionId=${sessionId}`;
             controller.enqueue(encoder.encode(`event: endpoint\ndata: ${endpointData}\n\n`));
+
+            // Start heartbeat timer to keep connection alive
+            session.heartbeatTimer = setInterval(() => {
+                if (!session.closed) {
+                    try {
+                        // Send SSE comment (: prefix) as heartbeat - doesn't trigger client events
+                        controller.enqueue(encoder.encode(`: heartbeat ${Date.now()}\n\n`));
+                    } catch {
+                        // Connection closed, stop heartbeat
+                        clearInterval(session.heartbeatTimer);
+                    }
+                }
+            }, HEARTBEAT_INTERVAL);
         },
         cancel() {
             const session = sessions.get(sessionId);
             if (session) {
                 session.closed = true;
+                if (session.heartbeatTimer) {
+                    clearInterval(session.heartbeatTimer);
+                }
                 sessions.delete(sessionId);
             }
             console.log(`[SSE] Session closed: ${sessionId}`);
@@ -128,6 +149,10 @@ export function closeSession(sessionId: string): void {
     const session = sessions.get(sessionId);
     if (session) {
         session.closed = true;
+        // Clear heartbeat timer
+        if (session.heartbeatTimer) {
+            clearInterval(session.heartbeatTimer);
+        }
         try {
             session.controller.close();
         } catch {
