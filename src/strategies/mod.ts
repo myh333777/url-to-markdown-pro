@@ -189,6 +189,21 @@ function isPaywalled(html: string): boolean {
 }
 
 /**
+ * Detect Google Search error/redirect pages (invalid content)
+ */
+function isGoogleErrorPage(html: string): boolean {
+    const errorPatterns = [
+        /If you're having trouble accessing Google Search/i,
+        /click here.*send feedback/i,
+        /<title>Google Search<\/title>/i,
+        /emsg=SG_REL/i,  // Google's error redirect parameter
+    ];
+
+    const text = html.slice(0, 3000);
+    return errorPatterns.some(pattern => pattern.test(text));
+}
+
+/**
  * Execute a single strategy fetch
  */
 async function executeStrategy(url: string, strategy: Strategy): Promise<FetchResult | JinaResult | any> {
@@ -245,7 +260,7 @@ async function fetchParallel(url: string, strategies: Strategy[]): Promise<Fetch
         // HTML based strategies
         const html = "html" in result ? result.html || "" : "";
         console.log(`[Strategy:${strategy}] Success: ${result.success}, Length: ${html.length}`);
-        if (result.success && !isBlocked(html) && !isPaywalled(html)) {
+        if (result.success && !isBlocked(html) && !isPaywalled(html) && !isGoogleErrorPage(html)) {
             // SPA detection: If HTML is too short, it's likely a shell. 
             // Reject it so Promise.any waits for better strategies (like Jina).
             if (html.length < 10000) { // Increased to 10k to be safe for modern sites
@@ -282,7 +297,7 @@ async function fetchParallelFallback(url: string, strategies: Strategy[]): Promi
 
         // HTML-based strategies (12ft, archive)
         if ("html" in result && result.html && result.html.length > 1000) {
-            if (result.success && !isBlocked(result.html) && !isPaywalled(result.html)) {
+            if (result.success && !isBlocked(result.html) && !isPaywalled(result.html) && !isGoogleErrorPage(result.html)) {
                 console.log(`[Fallback:${strategy}] HTML success, Length: ${result.html.length}`);
                 return result;
             }
