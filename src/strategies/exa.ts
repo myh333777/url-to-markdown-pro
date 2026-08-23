@@ -4,7 +4,7 @@
  * No API key required!
  */
 
-const EXA_MCP_ENDPOINT = "https://mcp.exa.ai/mcp?tools=crawling_exa";
+const EXA_MCP_ENDPOINT = "https://mcp.exa.ai/mcp?tools=web_search_exa,crawling_exa";
 
 export interface ExaResult {
     success: boolean;
@@ -100,6 +100,72 @@ async function callMcpTool(
     throw new Error("Invalid MCP response format");
 }
 
+function getTextContent(result: unknown): { text?: string; isError: boolean } {
+    const content = result as {
+        content?: Array<{ type: string; text: string }>;
+        isError?: boolean;
+    };
+    const textContent = content.content?.find((c) => c.type === "text");
+    return { text: textContent?.text, isError: content.isError === true };
+}
+
+function getReutersTitleFromUrl(url: string): string | null {
+    try {
+        const parsed = new URL(url);
+        if (!parsed.hostname.endsWith("reuters.com")) return null;
+
+        const slug = parsed.pathname.split("/").filter(Boolean).at(-1);
+        if (!slug) return null;
+
+        return slug
+            .replace(/-\d{4}-\d{2}-\d{2}$/, "")
+            .split("-")
+            .filter(Boolean)
+            .join(" ");
+    } catch {
+        return null;
+    }
+}
+
+async function fetchReutersMirror(url: string): Promise<string | null> {
+    const title = getReutersTitleFromUrl(url);
+    if (!title) return null;
+
+    const searchResult = await callMcpTool("web_search_exa", {
+        query: `Full syndicated copy of Reuters article "${title}"`,
+        numResults: 5,
+    });
+    const { text: searchText, isError: searchFailed } = getTextContent(searchResult);
+    if (searchFailed || !searchText) return null;
+
+    const mirrorUrls = [...searchText.matchAll(/^URL:\s+(https?:\/\/\S+)/gm)]
+        .map((match) => match[1])
+        .filter((candidate) => {
+            try {
+                return !new URL(candidate).hostname.endsWith("reuters.com");
+            } catch {
+                return false;
+            }
+        })
+        .slice(0, 5);
+
+    if (mirrorUrls.length === 0) return null;
+
+    for (const mirrorUrl of mirrorUrls.slice(0, 3)) {
+        const crawlResult = await callMcpTool("crawling_exa", {
+            urls: [mirrorUrl],
+            maxCharacters: 50000,
+        });
+        const { text: mirrorText, isError: crawlFailed } = getTextContent(crawlResult);
+
+        if (!crawlFailed && mirrorText && mirrorText.length >= 500) {
+            return mirrorText;
+        }
+    }
+
+    return null;
+}
+
 /**
  * Fetch URL content using Exa MCP crawling tool
  */
@@ -119,74 +185,88 @@ export async function fetchWithExa(url: string): Promise<ExaResult> {
 
         // Use crawling_exa tool to get URL content
         const result = await callMcpTool("crawling_exa", {
-            url: url,
+            urls: [url],
             maxCharacters: 50000,
         });
 
         // Parse MCP result
-        const content = result as { content?: Array<{ type: string; text: string }> };
-        if (content.content && Array.isArray(content.content)) {
-            const textContent = content.content.find((c) => c.type === "text");
-            if (textContent?.text) {
-                // Try to parse as JSON first (Exa returns structured data)
-                try {
-                    const parsed = JSON.parse(textContent.text);
+        const { text: resultText, isError } = getTextContent(result);
+        if (resultText) {
+            if (isError) {
+                const mirrorText = await fetchReutersMirror(url);
+                if (mirrorText) {
+                    return {
+                        success: true,
+                        markdown: mirrorText,
+                        strategy: "exa",
+                    };
+                }
 
-                    // Check for results array (Exa standard format)
-                    if (parsed.results && Array.isArray(parsed.results)) {
-                        if (parsed.results.length === 0) {
-                            return {
-                                success: false,
-                                error: "Exa returned zero results",
-                                strategy: "exa",
-                            };
-                        }
+                return {
+                    success: false,
+                    error: resultText,
+                    strategy: "exa",
+                };
+            }
 
-                        const firstResult = parsed.results[0];
-                        if (firstResult) {
-                            // Check for error status in result
-                            if (firstResult.status === "error" || !firstResult.id) {
-                                return {
-                                    success: false,
-                                    error: `Exa crawl failed: ${firstResult.error?.tag || firstResult.status}`,
-                                    strategy: "exa"
-                                };
-                            }
+            // Try to parse as JSON first (Exa returns structured data)
+            try {
+                const parsed = JSON.parse(resultText);
 
-                            return {
-                                success: true,
-                                markdown: firstResult.text || firstResult.content,
-                                title: firstResult.title,
-                                strategy: "exa",
-                            };
-                        }
-                    }
-
-                    if (parsed.text || parsed.content) {
+                // Check for results array (Exa standard format)
+                if (parsed.results && Array.isArray(parsed.results)) {
+                    if (parsed.results.length === 0) {
                         return {
-                            success: true,
-                            markdown: parsed.text || parsed.content,
-                            title: parsed.title,
+                            success: false,
+                            error: "Exa returned zero results",
                             strategy: "exa",
                         };
                     }
-                } catch {
-                    // Not JSON, use raw text but ensure it's not an internal error string
-                    if (textContent.text.includes("CRAWL_LIVECRAWL_TIMEOUT")) {
+
+                    const firstResult = parsed.results[0];
+                    if (firstResult) {
+                        // Check for error status in result
+                        if (firstResult.status === "error" || !firstResult.id) {
+                            return {
+                                success: false,
+                                error: `Exa crawl failed: ${firstResult.error?.tag || firstResult.status}`,
+                                strategy: "exa"
+                            };
+                        }
+
                         return {
-                            success: false,
-                            error: "Exa timeout in text response",
-                            strategy: "exa"
+                            success: true,
+                            markdown: firstResult.text || firstResult.content,
+                            title: firstResult.title,
+                            strategy: "exa",
                         };
                     }
                 }
 
-                return {
-                    success: true,
-                    markdown: textContent.text,
-                    strategy: "exa",
-                };
+                if (parsed.text || parsed.content) {
+                    return {
+                        success: true,
+                        markdown: parsed.text || parsed.content,
+                        title: parsed.title,
+                        strategy: "exa",
+                    };
+                }
+            } catch {
+                // Not JSON, use raw text but ensure it's not an internal error string
+                if (resultText.includes("CRAWL_LIVECRAWL_TIMEOUT")) {
+                    return {
+                        success: false,
+                        error: "Exa timeout in text response",
+                        strategy: "exa"
+                    };
+                }
             }
+
+            return {
+                success: true,
+                markdown: resultText,
+                strategy: "exa",
+            };
         }
 
         return {
