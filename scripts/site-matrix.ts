@@ -1,6 +1,6 @@
 const DEFAULT_ENDPOINT = "http://127.0.0.1:8000";
 const DEFAULT_SAMPLES = 3;
-const DEFAULT_CONCURRENCY = 5;
+const DEFAULT_CONCURRENCY = 3;
 const DEFAULT_MIN_PASS_RATE = 0.85;
 const MIN_CONTENT_LENGTH = 350;
 
@@ -100,6 +100,7 @@ interface Result extends Job {
   strategy?: string;
   elapsedMs?: number;
   contentLength?: number;
+  quality?: number;
   wallMs: number;
   error?: string;
 }
@@ -208,6 +209,7 @@ async function testJob(job: Job): Promise<Result> {
       strategy: response.headers.get("x-strategy-used") || undefined,
       elapsedMs: Number(response.headers.get("x-elapsed-ms") || 0) || undefined,
       contentLength: body.length,
+      quality: Number(response.headers.get("x-content-quality") || 0) || undefined,
       wallMs: Math.round(performance.now() - startedAt),
       error,
     };
@@ -281,10 +283,34 @@ const passed = results.filter((result) => result.status === "PASS").length;
 const falseOk = results.filter((result) => result.status === "FALSE_OK").length;
 const passRate = results.length ? passed / results.length : 0;
 
+function percentile(values: number[], p: number): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p));
+  return sorted[index];
+}
+
+const wallTimes = results.map((result) => result.wallMs);
+const passWallTimes = results
+  .filter((result) => result.status === "PASS")
+  .map((result) => result.wallMs);
+const strategyCounts = new Map<string, number>();
+for (const result of results) {
+  const strategy = result.strategy || "failed";
+  strategyCounts.set(strategy, (strategyCounts.get(strategy) || 0) + 1);
+}
+
 console.log(
   `\nPASS ${passed}/${results.length} = ${(passRate * 100).toFixed(1)}%`,
 );
 console.log(`FALSE_OK ${falseOk}`);
+console.log(
+  `LATENCY all p50=${percentile(wallTimes, 0.5)}ms p95=${percentile(wallTimes, 0.95)}ms; ` +
+    `pass p50=${percentile(passWallTimes, 0.5)}ms p95=${percentile(passWallTimes, 0.95)}ms`,
+);
+console.log(
+  `STRATEGIES ${[...strategyCounts.entries()].sort((a, b) => b[1] - a[1]).map(([name, count]) => `${name}=${count}`).join(" ")}`,
+);
 
 const nonPass = results.filter((result) => result.status !== "PASS");
 if (nonPass.length) {

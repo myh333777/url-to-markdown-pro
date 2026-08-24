@@ -74,6 +74,7 @@ export interface FetchOptions {
 export interface FetchResponse {
     html?: string;
     markdown?: string;  // Direct markdown from Jina
+    resolvedUrl?: string;
     strategy: Strategy;
     success: boolean;
     error?: string;
@@ -132,6 +133,7 @@ export const fetchHtmlWithStrategies = async (
     return {
         html: result.html,
         markdown: result.markdown,
+        resolvedUrl: result.resolvedUrl,
         strategy: result.strategy,
         success: result.success,
         error: result.error,

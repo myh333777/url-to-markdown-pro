@@ -114,7 +114,7 @@ export function getSiteRoute(url: string): SiteRoute {
     // higher-cost reader services race, replacing the older four-service
     // cascade while covering complementary failure modes.
     return {
-        primary: ["direct", "googlebot", "bingbot"],
+        primary: ["direct", "bingbot", "googlebot"],
         fallback: ["exa", "jina"],
     };
 }

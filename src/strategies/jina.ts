@@ -14,11 +14,12 @@ export interface JinaResult {
 
 const JINA_READER_URL = "https://r.jina.ai/";
 
-export async function fetchWithJina(url: string): Promise<JinaResult> {
+export async function fetchWithJina(url: string, signal?: AbortSignal): Promise<JinaResult> {
     const jinaUrl = `${JINA_READER_URL}${url}`;
 
     try {
         const response = await fetch(jinaUrl, {
+            signal,
             headers: {
                 "Accept": "text/plain",
                 "User-Agent": "URL-to-Markdown/1.0",

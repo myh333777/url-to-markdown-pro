@@ -1,9 +1,10 @@
 import { decodeResponse } from "../utils.ts";
 import type { FetchResult } from "./googlebot.ts";
 
-export async function fetchWithGoogleReferer(url: string): Promise<FetchResult> {
+export async function fetchWithGoogleReferer(url: string, signal?: AbortSignal): Promise<FetchResult> {
     try {
         const response = await fetch(url, {
+            signal,
             headers: {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Referer": "https://www.google.com/",
