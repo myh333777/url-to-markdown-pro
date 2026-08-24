@@ -9,7 +9,7 @@ function getArticleId(sourceUrl: string): string | null {
     try {
         const url = new URL(sourceUrl);
         if (url.hostname !== "news.google.com") return null;
-        const match = url.pathname.match(/\/articles\/([^/?]+)/);
+        const match = url.pathname.match(/\/(?:articles|read)\/([^/?]+)/);
         return match?.[1] || null;
     } catch {
         return null;
@@ -100,6 +100,35 @@ function buildBatchBody(id: string, timestamp: string, signature: string): strin
 }
 
 function extractExternalUrl(raw: string): string | null {
+    // Current Fbv4je responses are XSSI-prefixed JSON. Parse the response
+    // structurally so escaped query separators such as `\\u003d` do not
+    // truncate URLs (for example ABC News `?id=...` links).
+    const jsonStart = raw.indexOf("[[");
+    if (jsonStart !== -1) {
+        try {
+            const payload = JSON.parse(raw.slice(jsonStart));
+            for (const item of payload) {
+                if (
+                    Array.isArray(item) &&
+                    item[0] === "wrb.fr" &&
+                    item[1] === "Fbv4je" &&
+                    typeof item[2] === "string"
+                ) {
+                    const decoded = JSON.parse(item[2]);
+                    if (Array.isArray(decoded) && decoded[0] === "garturlres") {
+                        for (const value of decoded.slice(1)) {
+                            if (typeof value !== "string" || !/^https?:\/\//.test(value)) continue;
+                            const parsed = new URL(value);
+                            if (!parsed.hostname.endsWith("google.com")) return parsed.toString();
+                        }
+                    }
+                }
+            }
+        } catch {
+            // Fall through to the legacy regex parser for older response shapes.
+        }
+    }
+
     const matches = raw.match(/https?:\/\/[^\\"]+/g) || [];
     for (const match of matches) {
         const candidate = match

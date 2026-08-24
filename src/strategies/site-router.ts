@@ -13,7 +13,8 @@ export type RoutedStrategy =
     | "facebookbot"
     | "bingbot"
     | "google-referer"
-    | "exa";
+    | "exa"
+    | "jina";
 
 export interface SiteRoute {
     primary: RoutedStrategy[];
@@ -87,33 +88,33 @@ export function getSiteRoute(url: string): SiteRoute {
     try {
         hostname = new URL(url).hostname.toLowerCase();
     } catch {
-        return { primary: ["direct"], fallback: ["exa"] };
+        return { primary: ["direct"], fallback: ["exa", "jina"] };
     }
 
     // Reuters currently rejects data-center crawlers with DataDome 401.
     // A quick direct probe followed by Exa's syndicated-copy recovery is the
     // best speed/success tradeoff observed in production.
     if (matchesDomain(hostname, "reuters.com")) {
-        return { primary: ["direct"], fallback: ["exa"] };
+        return { primary: ["direct"], fallback: ["exa", "jina"] };
     }
 
     if (matchesAny(hostname, GOOGLE_REFERER_DOMAINS)) {
-        return { primary: ["direct", "google-referer"], fallback: ["exa"] };
+        return { primary: ["direct", "google-referer"], fallback: ["exa", "jina"] };
     }
 
     if (matchesAny(hostname, FACEBOOKBOT_DOMAINS)) {
-        return { primary: ["direct", "facebookbot"], fallback: ["exa"] };
+        return { primary: ["direct", "facebookbot"], fallback: ["exa", "jina"] };
     }
 
     if (matchesAny(hostname, GOOGLEBOT_DOMAINS)) {
-        return { primary: ["direct", "googlebot"], fallback: ["exa"] };
+        return { primary: ["direct", "googlebot"], fallback: ["exa", "jina"] };
     }
 
-    // Unknown sites keep a small generic race. Exa is the only expensive
-    // fallback by default; a few misses are preferable to a long four-service
-    // cascade for every article.
+    // Unknown sites keep a small generic race. Only after that fails do two
+    // higher-cost reader services race, replacing the older four-service
+    // cascade while covering complementary failure modes.
     return {
         primary: ["direct", "googlebot", "bingbot"],
-        fallback: ["exa"],
+        fallback: ["exa", "jina"],
     };
 }
