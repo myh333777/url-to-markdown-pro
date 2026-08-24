@@ -17,6 +17,7 @@ export { fetchWithJina, type JinaResult } from "./jina.ts";
 export { fetchWithFacebookbot } from "./facebookbot.ts";
 export { fetchWithBingbot } from "./bingbot.ts";
 export { fetchWithExa } from "./exa.ts";
+export { fetchWithGoogleReferer } from "./google-referer.ts";
 
 import { fetchWithGooglebot, type FetchResult } from "./googlebot.ts";
 import { fetchFromArchive } from "./archive.ts";
@@ -25,10 +26,12 @@ import { fetchWithJina, type JinaResult } from "./jina.ts";
 import { fetchWithFacebookbot } from "./facebookbot.ts";
 import { fetchWithBingbot } from "./bingbot.ts";
 import { fetchWithExa } from "./exa.ts";
+import { fetchWithGoogleReferer } from "./google-referer.ts";
+import { getSiteRoute } from "./site-router.ts";
 
 import { decodeResponse } from "../utils.ts";
 
-export type Strategy = "direct" | "googlebot" | "facebookbot" | "bingbot" | "archive" | "12ft" | "jina" | "exa" | "googlenews";
+export type Strategy = "direct" | "googlebot" | "facebookbot" | "bingbot" | "google-referer" | "archive" | "12ft" | "jina" | "exa" | "googlenews";
 
 export interface MultiStrategyResult {
     success: boolean;
@@ -40,12 +43,6 @@ export interface MultiStrategyResult {
     attempts: Array<{ strategy: Strategy; error?: string }>;
     elapsed?: number;
 }
-
-// Parallel strategies (race for fastest success)
-const PARALLEL_STRATEGIES: Strategy[] = ["direct", "googlebot", "facebookbot", "bingbot"];
-
-// Fallback strategies (sequential)
-const FALLBACK_STRATEGIES: Strategy[] = ["12ft", "archive", "jina", "exa"];
 
 /**
  * Helper to decode response, handling GBK/GB2312 if detected
@@ -216,6 +213,8 @@ async function executeStrategy(url: string, strategy: Strategy): Promise<FetchRe
             return await fetchWithFacebookbot(url);
         case "bingbot":
             return await fetchWithBingbot(url);
+        case "google-referer":
+            return await fetchWithGoogleReferer(url);
         case "archive":
             return await fetchFromArchive(url);
         case "12ft":
@@ -238,7 +237,7 @@ async function executeStrategy(url: string, strategy: Strategy): Promise<FetchRe
         }
         case "googlenews":
             // @ts-ignore
-            const { fetchWithGoogleNews } = await import("./googlenews.ts");
+            const { fetchWithGoogleNews } = await import("./googlenews-v2.ts");
             return await fetchWithGoogleNews(url);
         default:
             return { success: false, error: "Unknown strategy", strategy: "direct" };
@@ -333,22 +332,10 @@ export async function fetchWithStrategies(
         return createResult(result, strategy, attempts, startTime);
     }
 
-    // Auto-detect Google News URL
+    // Auto-detect Google News URL. Decode first; trying archive/bot strategies
+    // against the Google wrapper only adds latency and cannot reveal the source.
     if (url.includes("news.google.com") || url.includes("/rss/articles/")) {
         console.log(`[Fetch] Auto-detected Google News URL`);
-
-        // Try Archive.org first - most reliable for Google News redirects
-        console.log(`[Fetch] Trying Archive.org first for Google News...`);
-        const archiveResult = await executeStrategy(url, "archive");
-        attempts.push({ strategy: "archive", error: archiveResult.error });
-
-        if (archiveResult.success && archiveResult.html && archiveResult.html.length > 10000) {
-            console.log(`[Fetch] Archive.org succeeded for Google News`);
-            return createResult(archiveResult, "archive", attempts, startTime);
-        }
-
-        // If Archive fails, try the decoder
-        console.log(`[Fetch] Archive failed, trying googlenews decoder...`);
         const result = await executeStrategy(url, "googlenews");
         attempts.push({ strategy: "googlenews", error: result.error });
 
@@ -357,8 +344,8 @@ export async function fetchWithStrategies(
             return createResult(result, "googlenews", attempts, startTime);
         }
 
-        console.log(`[Fetch] Google News decoder failed, enabling bypass to try remaining fallbacks...`);
-        bypass = true; // Force bypass to skip simple direct fetch
+        console.log(`[Fetch] Google News decoder failed; stopping early`);
+        return createResult(result, "googlenews", attempts, startTime);
     }
 
 
@@ -384,24 +371,21 @@ export async function fetchWithStrategies(
         }
     }
 
-    // 1. Parallel race for bot strategies
-    // Skip if Google News strategy failed (bots can't handle the JS redirect)
-    let parallelResult = null;
-    if (!url.includes("news.google.com")) {
-        console.log(`[Fetch] Starting parallel race for: ${url}`);
-        parallelResult = await fetchParallel(url, PARALLEL_STRATEGIES);
-    } else {
-        console.log(`[Fetch] Skipping bot race for Google News URL`);
-    }
+    const route = getSiteRoute(url);
+
+    // 1. Small, domain-aware primary race.
+    console.log(`[Fetch] Primary route: ${route.primary.join(", ")}`);
+    const parallelResult = await fetchParallel(url, route.primary as Strategy[]);
 
     if (parallelResult && parallelResult.success) {
         console.log(`[Fetch] Parallel success with: ${parallelResult.strategy}`);
         return createResult(parallelResult, parallelResult.strategy as Strategy, attempts, startTime);
     }
 
-    // 2. Parallel race for fallback strategies (12ft, archive, jina, exa)
-    console.log(`[Fetch] Primary parallel failed, starting fallback parallel race...`);
-    const fallbackResult = await fetchParallelFallback(url, FALLBACK_STRATEGIES);
+    // 2. One high-value fallback by default. This intentionally trades a small
+    // amount of coverage for much lower latency and fewer external requests.
+    console.log(`[Fetch] Primary route failed; fallback: ${route.fallback.join(", ")}`);
+    const fallbackResult = await fetchParallelFallback(url, route.fallback as Strategy[]);
 
     if (fallbackResult && fallbackResult.success) {
         console.log(`[Fetch] Fallback parallel success with: ${fallbackResult.strategy}`);
