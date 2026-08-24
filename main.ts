@@ -105,6 +105,14 @@ Deno.serve(async (request: Request) => {
                     headers.set("X-Strategy-Used", result.strategy);
                     headers.set("X-Elapsed-Ms", String(result.elapsed));
                     headers.set("X-From-Cache", String(result.fromCache));
+                    if (result.resolvedUrl) headers.set("X-Resolved-URL", result.resolvedUrl);
+                    if (result.quality !== undefined) headers.set("X-Content-Quality", String(result.quality));
+                    if (result.timings) {
+                        headers.set(
+                            "Server-Timing",
+                            `fetch;dur=${result.timings.fetch}, extract;dur=${result.timings.extract}, total;dur=${result.timings.total}`,
+                        );
+                    }
 
                     return new Response(result.content, { headers });
                 } catch (error) {
@@ -188,6 +196,14 @@ Deno.serve(async (request: Request) => {
                 headers.set("X-Strategy-Used", result.strategy);
                 headers.set("X-Elapsed-Ms", String(result.elapsed));
                 headers.set("X-From-Cache", String(result.fromCache));
+                if (result.resolvedUrl) headers.set("X-Resolved-URL", result.resolvedUrl);
+                if (result.quality !== undefined) headers.set("X-Content-Quality", String(result.quality));
+                if (result.timings) {
+                    headers.set(
+                        "Server-Timing",
+                        `fetch;dur=${result.timings.fetch}, extract;dur=${result.timings.extract}, total;dur=${result.timings.total}`,
+                    );
+                }
 
                 if (options.download) {
                     const fileName = generateFilename(targetUrl, options.jsonFormat);

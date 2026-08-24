@@ -6,6 +6,7 @@ interface StrategyResult {
     html?: string;
     markdown?: string;
     title?: string;
+    resolvedUrl?: string;
     strategy: string;
     error?: string;
 }
@@ -47,6 +48,7 @@ export async function fetchWithGoogleNews(url: string): Promise<StrategyResult> 
         const response: StrategyResult = {
             success: true,
             title: result.title,
+            resolvedUrl: decodedUrl,
             strategy: `googlenews-${result.strategy}`,
         };
         if (result.markdown) response.markdown = result.markdown;

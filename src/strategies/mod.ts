@@ -28,6 +28,7 @@ import { fetchWithBingbot } from "./bingbot.ts";
 import { fetchWithExa } from "./exa.ts";
 import { fetchWithGoogleReferer } from "./google-referer.ts";
 import { getSiteRoute } from "./site-router.ts";
+import { decodeGoogleNewsUrl } from "./google-news-decoder.ts";
 
 import { decodeResponse } from "../utils.ts";
 
@@ -38,6 +39,7 @@ export interface MultiStrategyResult {
     html?: string;
     markdown?: string;  // Only from Jina or Exa
     title?: string;
+    resolvedUrl?: string;
     strategy: Strategy;
     error?: string;
     attempts: Array<{ strategy: Strategy; error?: string }>;
@@ -50,6 +52,10 @@ export interface MultiStrategyResult {
 async function decodeResponseWrapper(response: Response): Promise<string> {
     return await decodeResponse(response);
 }
+
+const PRIMARY_HEDGE_DELAY_MS = 180;
+const FALLBACK_HEDGE_DELAY_MS = 180;
+const FALLBACK_TIMEOUT_MS = 10000;
 
 /**
  * Clean Jina/Exa output (remove metadata headers)
@@ -69,9 +75,10 @@ function cleanMarkdown(markdown: string): string {
 /**
  * Fetch with direct request (no bypass)
  */
-async function fetchDirect(url: string): Promise<FetchResult> {
+async function fetchDirect(url: string, signal?: AbortSignal): Promise<FetchResult> {
     try {
         const response = await fetch(url, {
+            signal,
             headers: {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -216,27 +223,185 @@ function isGoogleErrorPage(html: string): boolean {
     return errorPatterns.some(pattern => pattern.test(text));
 }
 
+function isLikelyUsefulHtml(html: string): boolean {
+    if (!html || html.length < 300) return false;
+    if (/<article\b/i.test(html)) return true;
+    if (/"@type"\s*:\s*"(?:NewsArticle|Article|ReportageNewsArticle|BlogPosting)"/i.test(html)) return true;
+
+    const sample = html.slice(0, 250000)
+        .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&(?:nbsp|amp|lt|gt|quot|#\d+|#x[0-9a-f]+);/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    return sample.length >= 100;
+}
+
+function isReutersUrl(url: string): boolean {
+    try {
+        const hostname = new URL(url).hostname.toLowerCase();
+        return hostname === "reuters.com" || hostname.endsWith(".reuters.com");
+    } catch {
+        return false;
+    }
+}
+
+function getReutersSearchTitle(url: string): string | null {
+    try {
+        const slug = new URL(url).pathname.split("/").filter(Boolean).at(-1);
+        if (!slug) return null;
+        return slug
+            .replace(/-\d{4}-\d{2}-\d{2}$/, "")
+            .replace(/-(\d)(\d)-/g, "-$1.$2-")
+            .split("-")
+            .filter(Boolean)
+            .join(" ");
+    } catch {
+        return null;
+    }
+}
+
+function decodeXmlText(value: string): string {
+    return value
+        .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'");
+}
+
+function titleTokens(value: string): Set<string> {
+    const stopWords = new Set([
+        "a", "an", "and", "as", "at", "by", "for", "from", "in", "is", "of",
+        "on", "or", "report", "reports", "says", "the", "to", "with",
+    ]);
+    return new Set(
+        value
+            .toLowerCase()
+            .replace(/[^a-z0-9.%]+/g, " ")
+            .split(/\s+/)
+            .filter((token) => token.length > 1 && !stopWords.has(token)),
+    );
+}
+
+function titleCoverage(expected: string, candidate: string): number {
+    const expectedTokens = titleTokens(expected);
+    const candidateTokens = titleTokens(candidate.replace(/\s+-\s+[^-]+$/, ""));
+    if (expectedTokens.size < 4 || candidateTokens.size < 4) return 0;
+    let matches = 0;
+    for (const token of expectedTokens) {
+        if (candidateTokens.has(token)) matches += 1;
+    }
+    return matches / expectedTokens.size;
+}
+
+async function fetchReutersSyndicated(
+    url: string,
+    attempts: Array<{ strategy: Strategy; error?: string }>,
+): Promise<MultiStrategyResult | null> {
+    const title = getReutersSearchTitle(url);
+    if (!title) return null;
+
+    const query = encodeURIComponent(title);
+    const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=en-US&gl=US&ceid=US:en`;
+    let xml = "";
+    try {
+        const response = await fetch(rssUrl, {
+            signal: AbortSignal.timeout(2500),
+            headers: { "User-Agent": "URL2MD/2.5" },
+        });
+        if (!response.ok) return null;
+        xml = await response.text();
+    } catch {
+        return null;
+    }
+
+    const candidates = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)]
+        .slice(0, 12)
+        .map((match) => {
+            const item = match[1];
+            const link = item.match(/<link>([\s\S]*?)<\/link>/)?.[1];
+            const itemTitle = item.match(/<title>([\s\S]*?)<\/title>/)?.[1] || "";
+            const source = item.match(/<source[^>]*>([\s\S]*?)<\/source>/)?.[1] || "";
+            return link
+                ? {
+                    link: decodeXmlText(link.trim()),
+                    title: decodeXmlText(itemTitle.trim()),
+                    source: decodeXmlText(source.trim()),
+                }
+                : null;
+        })
+        .filter((candidate): candidate is { link: string; title: string; source: string } => Boolean(candidate))
+        .filter((candidate) => !/\breuters\b/i.test(candidate.source))
+        .filter((candidate) => titleCoverage(title, candidate.title) >= 0.65)
+        .sort((a, b) => {
+            const score = (candidate: { source: string }) => {
+                if (/yahoo|tradingview|forex factory|aol/i.test(candidate.source)) return 0;
+                if (/bloomberg|wall street journal|financial times|economist|barron|marketwatch/i.test(candidate.source)) return 2;
+                return 1;
+            };
+            return score(a) - score(b);
+        });
+
+    for (const candidate of candidates) {
+        let resolved: string | null = null;
+        try {
+            resolved = await decodeGoogleNewsUrl(candidate.link);
+        } catch {
+            continue;
+        }
+        if (!resolved || isReutersUrl(resolved)) continue;
+
+        try {
+            const result = await fetchWithStrategies(resolved, {
+                bypass: true,
+                strategy: undefined,
+                allowSyndicated: false,
+            });
+            if (result.success) {
+                console.log(`[Reuters] Recovered via syndicated source: ${resolved}`);
+                return {
+                    ...result,
+                    resolvedUrl: resolved,
+                    attempts,
+                };
+            }
+        } catch {
+            // Try the next syndicated candidate.
+        }
+    }
+
+    return null;
+}
+
 /**
  * Execute a single strategy fetch
  */
-async function executeStrategy(url: string, strategy: Strategy): Promise<FetchResult | JinaResult | any> {
+async function executeStrategy(
+    url: string,
+    strategy: Strategy,
+    signal?: AbortSignal,
+): Promise<FetchResult | JinaResult | any> {
     switch (strategy) {
         case "direct":
-            return await fetchDirect(url);
+            return await fetchDirect(url, signal);
         case "googlebot":
-            return await fetchWithGooglebot(url);
+            return await fetchWithGooglebot(url, signal);
         case "facebookbot":
-            return await fetchWithFacebookbot(url);
+            return await fetchWithFacebookbot(url, signal);
         case "bingbot":
-            return await fetchWithBingbot(url);
+            return await fetchWithBingbot(url, signal);
         case "google-referer":
-            return await fetchWithGoogleReferer(url);
+            return await fetchWithGoogleReferer(url, signal);
         case "archive":
             return await fetchFromArchive(url);
         case "12ft":
             return await fetchWith12ft(url);
         case "jina": {
-            const result = await fetchWithJina(url);
+            const result = await fetchWithJina(url, signal);
             if (result.success && result.markdown) {
                 // Remove Jina metadata headers
                 result.markdown = result.markdown.replace(/^Title:[\s\S]*?Markdown Content:\n+/i, "");
@@ -244,7 +409,7 @@ async function executeStrategy(url: string, strategy: Strategy): Promise<FetchRe
             return result;
         }
         case "exa": {
-            const result = await fetchWithExa(url);
+            const result = await fetchWithExa(url, signal);
             if (result.success && result.markdown) {
                 // Remove Exa/Jina-style metadata if any (Exa usually clean, but just in case)
                 result.markdown = result.markdown.replace(/^Title:[\s\S]*?Markdown Content:\n+/i, "");
@@ -271,116 +436,145 @@ function recordAttempt(
     attempts?.push({ strategy, error });
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-    return Promise.race([
-        promise,
-        new Promise<T>((_, reject) =>
-            setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs)
-        ),
-    ]);
+function isAbortError(error: unknown): boolean {
+    return error instanceof DOMException && error.name === "AbortError";
 }
 
-async function fetchParallel(
+function isTransientError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /(error sending request|fetch failed|network|connection|socket|reset|econn|temporar(?:y|ily) unavailable)/i.test(message);
+}
+
+function validateStrategyResult(
+    result: FetchResult | JinaResult | any,
+    strategy: Strategy,
+): FetchResult | JinaResult | any {
+    if (
+        "markdown" in result &&
+        result.markdown &&
+        result.markdown.length > 100 &&
+        !isBlocked(result.markdown) &&
+        !isPaywalled(result.markdown) &&
+        !isGoogleErrorPage(result.markdown)
+    ) {
+        return result;
+    }
+
+    const html = "html" in result ? result.html || "" : "";
+    if (
+        result.success &&
+        html &&
+        !isBlocked(html) &&
+        !isPaywalled(html) &&
+        !isGoogleErrorPage(html) &&
+        isLikelyUsefulHtml(html)
+    ) {
+        return result;
+    }
+
+    throw new Error(result.error || `${strategy} rejected by content quality checks`);
+}
+
+async function executeValidatedStrategy(
+    url: string,
+    strategy: Strategy,
+    signal: AbortSignal,
+    retryTransient: boolean,
+): Promise<FetchResult | JinaResult | any> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+            const result = await executeStrategy(url, strategy, signal);
+            return validateStrategyResult(result, strategy);
+        } catch (error) {
+            if (
+                attempt === 0 &&
+                retryTransient &&
+                !signal.aborted &&
+                isTransientError(error)
+            ) {
+                await new Promise((resolve) => setTimeout(resolve, 60));
+                continue;
+            }
+            throw error;
+        }
+    }
+    throw new Error(`${strategy} failed`);
+}
+
+async function fetchHedged(
     url: string,
     strategies: Strategy[],
     attempts?: Array<{ strategy: Strategy; error?: string }>,
+    hedgeDelayMs = PRIMARY_HEDGE_DELAY_MS,
+    timeoutMs?: number,
 ): Promise<FetchResult | JinaResult | null> {
-    const promises = strategies.map(async (strategy) => {
-        let result;
-        try {
-            result = await executeStrategy(url, strategy);
-        } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            recordAttempt(attempts, strategy, message);
-            throw error;
-        }
+    if (strategies.length === 0) return null;
 
-        // Jina returns markdown, accept it if it has content
-        if (
-            "markdown" in result &&
-            result.markdown &&
-            result.markdown.length > 100 &&
-            !isBlocked(result.markdown) &&
-            !isPaywalled(result.markdown) &&
-            !isGoogleErrorPage(result.markdown)
-        ) {
-            return result;
-        }
+    return await new Promise((resolve) => {
+        const controllers = strategies.map(() => new AbortController());
+        let nextIndex = 0;
+        let active = 0;
+        let settled = false;
+        let hedgeTimer: number | undefined;
 
-        // HTML based strategies
-        const html = "html" in result ? result.html || "" : "";
-        console.log(`[Strategy:${strategy}] Success: ${result.success}, Length: ${html.length}`);
-        if (result.success && !isBlocked(html) && !isPaywalled(html) && !isGoogleErrorPage(html)) {
-            // SPA detection: If HTML is too short, it's likely a shell. 
-            // Reject it so Promise.any waits for better strategies (like Jina).
-            if (html.length < 10000) { // Increased to 10k to be safe for modern sites
-                throw new Error("Content likely incomplete (SPA shell)");
+        const finish = (result: FetchResult | JinaResult | null) => {
+            if (settled) return;
+            settled = true;
+            if (hedgeTimer !== undefined) clearTimeout(hedgeTimer);
+            for (const controller of controllers) controller.abort();
+            resolve(result);
+        };
+
+        const scheduleNext = () => {
+            if (settled || nextIndex >= strategies.length || hedgeTimer !== undefined) return;
+            hedgeTimer = setTimeout(() => {
+                hedgeTimer = undefined;
+                startNext();
+            }, hedgeDelayMs);
+        };
+
+        const startNext = () => {
+            if (settled || nextIndex >= strategies.length) {
+                if (!settled && active === 0) finish(null);
+                return;
             }
-            return result;
-        }
-        recordAttempt(attempts, strategy, result.error || "Rejected by content quality checks");
-        throw new Error(result.error || "Failed");
-    });
 
-    try {
-        // Return the first successful result
-        return await Promise.any(promises);
-    } catch {
-        // All failed
-        return null;
-    }
-}
-
-/**
- * Parallel fetch for fallback strategies (12ft, archive, jina, exa)
- * These strategies are slower but more reliable, so we race them too
- * No HTML length check since Jina/Exa return markdown directly
- */
-async function fetchParallelFallback(
-    url: string,
-    strategies: Strategy[],
-    attempts?: Array<{ strategy: Strategy; error?: string }>,
-): Promise<FetchResult | JinaResult | null> {
-    const promises = strategies.map(async (strategy) => {
-        let result;
-        try {
-            result = await withTimeout(executeStrategy(url, strategy), 8000, strategy);
-        } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            recordAttempt(attempts, strategy, message);
-            throw error;
-        }
-
-        // Markdown-based strategies (Jina, Exa)
-        if (
-            "markdown" in result &&
-            result.markdown &&
-            result.markdown.length > 100 &&
-            !isBlocked(result.markdown) &&
-            !isPaywalled(result.markdown) &&
-            !isGoogleErrorPage(result.markdown)
-        ) {
-            console.log(`[Fallback:${strategy}] Markdown success, Length: ${result.markdown.length}`);
-            return result;
-        }
-
-        // HTML-based strategies (12ft, archive)
-        if ("html" in result && result.html && result.html.length > 1000) {
-            if (result.success && !isBlocked(result.html) && !isPaywalled(result.html) && !isGoogleErrorPage(result.html)) {
-                console.log(`[Fallback:${strategy}] HTML success, Length: ${result.html.length}`);
-                return result;
+            if (hedgeTimer !== undefined) {
+                clearTimeout(hedgeTimer);
+                hedgeTimer = undefined;
             }
-        }
 
-        recordAttempt(attempts, strategy, result.error || "Rejected by content quality checks");
-        throw new Error(result.error || "Failed");
+            const index = nextIndex++;
+            const strategy = strategies[index];
+            const controller = controllers[index];
+            const signal = timeoutMs
+                ? AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)])
+                : controller.signal;
+            active += 1;
+
+            executeValidatedStrategy(url, strategy, signal, timeoutMs === undefined)
+                .then((result) => {
+                    console.log(`[Strategy:${strategy}] Hedged success`);
+                    finish(result);
+                })
+                .catch((error) => {
+                    active -= 1;
+                    if (!isAbortError(error)) {
+                        const message = error instanceof Error ? error.message : String(error);
+                        recordAttempt(attempts, strategy, message);
+                    }
+                    if (nextIndex < strategies.length) {
+                        startNext();
+                    } else if (active === 0) {
+                        finish(null);
+                    }
+                });
+
+            scheduleNext();
+        };
+
+        startNext();
     });
-
-    try {
-        return await Promise.any(promises);
-    } catch {
-        return null;
-    }
 }
 
 /**
@@ -388,9 +582,10 @@ async function fetchParallelFallback(
  */
 export async function fetchWithStrategies(
     url: string,
-    options: { bypass: boolean; strategy?: Strategy }
+    options: { bypass: boolean; strategy?: Strategy; allowSyndicated?: boolean }
 ): Promise<MultiStrategyResult> {
     const { strategy } = options;
+    const allowSyndicated = options.allowSyndicated !== false;
     let { bypass } = options;
     const startTime = Date.now();
     const attempts: Array<{ strategy: Strategy; error?: string }> = [];
@@ -399,8 +594,13 @@ export async function fetchWithStrategies(
     if (strategy && strategy !== "custom" && strategy !== "auto") {
         console.log(`[Fetch] Using explicit strategy: ${strategy}`);
         const result = await executeStrategy(url, strategy);
-        attempts.push({ strategy, error: result.error });
-        return createResult(result, strategy, attempts, startTime);
+        try {
+            return createResult(validateStrategyResult(result, strategy), strategy, attempts, startTime);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            attempts.push({ strategy, error: message });
+            return createResult({ success: false, error: message }, strategy, attempts, startTime);
+        }
     }
 
     // Auto-detect Google News URL. Decode first; trying archive/bot strategies
@@ -446,18 +646,33 @@ export async function fetchWithStrategies(
 
     // 1. Small, domain-aware primary race.
     console.log(`[Fetch] Primary route: ${route.primary.join(", ")}`);
-    const parallelResult = await fetchParallel(url, route.primary as Strategy[], attempts);
+    const parallelResult = await fetchHedged(
+        url,
+        route.primary as Strategy[],
+        attempts,
+        PRIMARY_HEDGE_DELAY_MS,
+    );
 
     if (parallelResult && parallelResult.success) {
         console.log(`[Fetch] Parallel success with: ${parallelResult.strategy}`);
         return createResult(parallelResult, parallelResult.strategy as Strategy, attempts, startTime);
     }
 
+    if (allowSyndicated && isReutersUrl(url)) {
+        const syndicatedResult = await fetchReutersSyndicated(url, attempts);
+        if (syndicatedResult?.success) {
+            return {
+                ...syndicatedResult,
+                elapsed: Date.now() - startTime,
+            };
+        }
+    }
+
     // 2. One additional cheap crawler on misses. This recovers sites that
     // selectively admit a social crawler without paying the cost on normal hits.
     if (!route.primary.includes("facebookbot")) {
         console.log(`[Fetch] Primary route failed; trying cheap secondary: facebookbot`);
-        const secondaryResult = await fetchParallel(url, ["facebookbot"], attempts);
+        const secondaryResult = await fetchHedged(url, ["facebookbot"], attempts, 0);
         if (secondaryResult && secondaryResult.success) {
             console.log(`[Fetch] Secondary success with: ${secondaryResult.strategy}`);
             return createResult(secondaryResult, secondaryResult.strategy as Strategy, attempts, startTime);
@@ -468,7 +683,13 @@ export async function fetchWithStrategies(
     // strategies fail, retaining most of the latency savings of the lean path
     // while avoiding systematic blind spots where Exa or Jina alone fails.
     console.log(`[Fetch] Primary route failed; fallback: ${route.fallback.join(", ")}`);
-    const fallbackResult = await fetchParallelFallback(url, route.fallback as Strategy[], attempts);
+    const fallbackResult = await fetchHedged(
+        url,
+        route.fallback as Strategy[],
+        attempts,
+        FALLBACK_HEDGE_DELAY_MS,
+        FALLBACK_TIMEOUT_MS,
+    );
 
     if (fallbackResult && fallbackResult.success) {
         console.log(`[Fetch] Fallback parallel success with: ${fallbackResult.strategy}`);
@@ -500,6 +721,7 @@ function createResult(
             success: result.success,
             markdown: result.markdown,
             title: result.title,
+            resolvedUrl: result.resolvedUrl,
             strategy: strategy,
             attempts,
             elapsed: Date.now() - startTime,
@@ -510,6 +732,7 @@ function createResult(
     return {
         success: result.success,
         html: result.html,
+        resolvedUrl: result.resolvedUrl,
         strategy: strategy,
         attempts,
         elapsed: Date.now() - startTime,

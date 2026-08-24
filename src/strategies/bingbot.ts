@@ -32,12 +32,13 @@ function getRandomItem<T>(arr: T[]): T {
     return arr[Math.floor(Math.random() * arr.length)];
 }
 
-export async function fetchWithBingbot(url: string): Promise<FetchResult> {
+export async function fetchWithBingbot(url: string, signal?: AbortSignal): Promise<FetchResult> {
     const userAgent = getRandomItem(BINGBOT_USER_AGENTS);
     const forwardedIP = getRandomItem(BING_IPS);
 
     try {
         const response = await fetch(url, {
+            signal,
             headers: {
                 "User-Agent": userAgent,
                 "X-Forwarded-For": forwardedIP,

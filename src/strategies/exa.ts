@@ -5,6 +5,8 @@
  */
 
 const EXA_MCP_ENDPOINT = "https://mcp.exa.ai/mcp?tools=web_search_exa,crawling_exa";
+const EXA_BREAKER_MS = 5 * 60 * 1000;
+const EXA_MAX_CONCURRENCY = 2;
 
 export interface ExaResult {
     success: boolean;
@@ -17,21 +19,122 @@ export interface ExaResult {
 
 // Session ID for MCP protocol
 let mcpSessionId: string | null = null;
+let initPromise: Promise<boolean> | null = null;
+let exaBlockedUntil = 0;
+let exaActive = 0;
+const exaWaiters: Array<() => void> = [];
+
+class ExaHttpError extends Error {
+    constructor(message: string, public status: number) {
+        super(message);
+        this.name = "ExaHttpError";
+    }
+}
+
+function getAuthHeader(): Record<string, string> {
+    try {
+        const key = Deno.env.get("EXA_API_KEY")?.trim();
+        return key ? { Authorization: `Bearer ${key}` } : {};
+    } catch {
+        return {};
+    }
+}
+
+async function acquireExaSlot(): Promise<void> {
+    if (exaActive < EXA_MAX_CONCURRENCY) {
+        exaActive += 1;
+        return;
+    }
+    await new Promise<void>((resolve) => exaWaiters.push(resolve));
+    exaActive += 1;
+}
+
+function releaseExaSlot(): void {
+    exaActive = Math.max(0, exaActive - 1);
+    exaWaiters.shift()?.();
+}
+
+function tripBreaker(): void {
+    exaBlockedUntil = Date.now() + EXA_BREAKER_MS;
+}
+
+function parseJsonRpcPayload(text: string, contentType: string, requestId: string): any {
+    const candidates: any[] = [];
+
+    if (contentType.includes("application/json")) {
+        try {
+            candidates.push(JSON.parse(text));
+        } catch {
+            // Fall through to SSE parsing below.
+        }
+    }
+
+    for (const line of text.split(/\r?\n/)) {
+        if (!line.startsWith("data:")) continue;
+        const raw = line.slice(5).trim();
+        if (!raw || raw === "[DONE]") continue;
+        try {
+            candidates.push(JSON.parse(raw));
+        } catch {
+            // Ignore non-JSON SSE data frames.
+        }
+    }
+
+    return candidates.find((item) => String(item?.id) === requestId)
+        || candidates.find((item) => item?.result !== undefined || item?.error !== undefined)
+        || null;
+}
+
+async function readMcpResponse(response: Response, requestId: string): Promise<any> {
+    const text = await response.text();
+    const payload = parseJsonRpcPayload(
+        text,
+        response.headers.get("content-type") || "",
+        requestId,
+    );
+
+    const errorMessage = payload?.error?.message
+        || (response.ok ? "" : text.slice(0, 500))
+        || `Exa MCP HTTP ${response.status}`;
+
+    if (response.status === 429 || /rate limit/i.test(errorMessage)) {
+        tripBreaker();
+        throw new ExaHttpError("Exa rate limited; circuit breaker opened", 429);
+    }
+
+    if (!response.ok) {
+        throw new ExaHttpError(errorMessage, response.status);
+    }
+    if (!payload) {
+        throw new Error("Invalid MCP response format");
+    }
+    if (payload.error) {
+        throw new Error(payload.error.message || "Exa MCP error");
+    }
+    return payload.result;
+}
 
 /**
  * Initialize MCP session
  */
-async function initMcpSession(): Promise<boolean> {
-    try {
+async function initMcpSession(signal?: AbortSignal): Promise<boolean> {
+    if (mcpSessionId) return true;
+    if (initPromise) return await initPromise;
+
+    initPromise = (async () => {
+      try {
+        const requestId = `init-${Date.now()}`;
         const response = await fetch(EXA_MCP_ENDPOINT, {
             method: "POST",
+            signal,
             headers: {
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream",
+                ...getAuthHeader(),
             },
             body: JSON.stringify({
                 jsonrpc: "2.0",
-                id: "init-1",
+                id: requestId,
                 method: "initialize",
                 params: {
                     protocolVersion: "2024-11-05",
@@ -42,19 +145,18 @@ async function initMcpSession(): Promise<boolean> {
         });
 
         mcpSessionId = response.headers.get("mcp-session-id");
-
-        const text = await response.text();
-        const dataMatch = text.match(/data: (.+)/);
-        if (dataMatch) {
-            const data = JSON.parse(dataMatch[1]);
-            return data.result?.serverInfo !== undefined;
-        }
-
-        return mcpSessionId !== null;
-    } catch (error) {
+        const result = await readMcpResponse(response, requestId);
+        return result?.serverInfo !== undefined || mcpSessionId !== null;
+      } catch (error) {
         console.error("[Exa MCP] Init error:", error);
+        mcpSessionId = null;
         return false;
-    }
+      } finally {
+        initPromise = null;
+      }
+    })();
+
+    return await initPromise;
 }
 
 /**
@@ -62,42 +164,54 @@ async function initMcpSession(): Promise<boolean> {
  */
 async function callMcpTool(
     toolName: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
 ): Promise<unknown> {
-    const response = await fetch(EXA_MCP_ENDPOINT, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            ...(mcpSessionId && { "mcp-session-id": mcpSessionId }),
-        },
-        body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: Date.now().toString(),
-            method: "tools/call",
-            params: {
-                name: toolName,
-                arguments: args,
-            },
-        }),
-    });
-
-    const newSessionId = response.headers.get("mcp-session-id");
-    if (newSessionId) {
-        mcpSessionId = newSessionId;
-    }
-
-    const text = await response.text();
-    const dataMatch = text.match(/data: (.+)/);
-    if (dataMatch) {
-        const data = JSON.parse(dataMatch[1]);
-        if (data.error) {
-            throw new Error(data.error.message);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (!mcpSessionId && !(await initMcpSession(signal))) {
+            throw new Error("Failed to initialize Exa MCP session");
         }
-        return data.result;
+
+        const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const response = await fetch(EXA_MCP_ENDPOINT, {
+            method: "POST",
+            signal,
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                ...getAuthHeader(),
+                ...(mcpSessionId && { "mcp-session-id": mcpSessionId }),
+            },
+            body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: requestId,
+                method: "tools/call",
+                params: {
+                    name: toolName,
+                    arguments: args,
+                },
+            }),
+        });
+
+        const newSessionId = response.headers.get("mcp-session-id");
+        if (newSessionId) mcpSessionId = newSessionId;
+
+        try {
+            return await readMcpResponse(response, requestId);
+        } catch (error) {
+            if (
+                attempt === 0 &&
+                error instanceof ExaHttpError &&
+                [400, 401, 404].includes(error.status)
+            ) {
+                mcpSessionId = null;
+                continue;
+            }
+            throw error;
+        }
     }
 
-    throw new Error("Invalid MCP response format");
+    throw new Error("Exa MCP request failed");
 }
 
 function getTextContent(result: unknown): { text?: string; isError: boolean } {
@@ -127,14 +241,14 @@ function getReutersTitleFromUrl(url: string): string | null {
     }
 }
 
-async function fetchReutersMirror(url: string): Promise<string | null> {
+async function fetchReutersMirror(url: string, signal?: AbortSignal): Promise<string | null> {
     const title = getReutersTitleFromUrl(url);
     if (!title) return null;
 
     const searchResult = await callMcpTool("web_search_exa", {
         query: `Full syndicated copy of Reuters article "${title}"`,
         numResults: 5,
-    });
+    }, signal);
     const { text: searchText, isError: searchFailed } = getTextContent(searchResult);
     if (searchFailed || !searchText) return null;
 
@@ -155,7 +269,7 @@ async function fetchReutersMirror(url: string): Promise<string | null> {
         const crawlResult = await callMcpTool("crawling_exa", {
             urls: [mirrorUrl],
             maxCharacters: 50000,
-        });
+        }, signal);
         const { text: mirrorText, isError: crawlFailed } = getTextContent(crawlResult);
 
         if (!crawlFailed && mirrorText && mirrorText.length >= 500) {
@@ -169,11 +283,20 @@ async function fetchReutersMirror(url: string): Promise<string | null> {
 /**
  * Fetch URL content using Exa MCP crawling tool
  */
-export async function fetchWithExa(url: string): Promise<ExaResult> {
+export async function fetchWithExa(url: string, signal?: AbortSignal): Promise<ExaResult> {
+    if (exaBlockedUntil > Date.now()) {
+        return {
+            success: false,
+            error: `Exa circuit breaker open for ${Math.ceil((exaBlockedUntil - Date.now()) / 1000)}s`,
+            strategy: "exa",
+        };
+    }
+
+    await acquireExaSlot();
     try {
         // Initialize session if needed
         if (!mcpSessionId) {
-            const initialized = await initMcpSession();
+            const initialized = await initMcpSession(signal);
             if (!initialized) {
                 return {
                     success: false,
@@ -187,13 +310,13 @@ export async function fetchWithExa(url: string): Promise<ExaResult> {
         const result = await callMcpTool("crawling_exa", {
             urls: [url],
             maxCharacters: 50000,
-        });
+        }, signal);
 
         // Parse MCP result
         const { text: resultText, isError } = getTextContent(result);
         if (resultText) {
             if (isError) {
-                const mirrorText = await fetchReutersMirror(url);
+                const mirrorText = await fetchReutersMirror(url, signal);
                 if (mirrorText) {
                     return {
                         success: true,
@@ -276,12 +399,16 @@ export async function fetchWithExa(url: string): Promise<ExaResult> {
         };
     } catch (error) {
         // Reset session on error for retry
-        mcpSessionId = null;
+        if (!(error instanceof ExaHttpError && error.status === 429)) {
+            mcpSessionId = null;
+        }
 
         return {
             success: false,
             error: error instanceof Error ? error.message : String(error),
             strategy: "exa",
         };
+    } finally {
+        releaseExaSlot();
     }
 }

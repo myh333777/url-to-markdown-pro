@@ -22,11 +22,12 @@ function getRandomItem<T>(arr: T[]): T {
     return arr[Math.floor(Math.random() * arr.length)];
 }
 
-export async function fetchWithFacebookbot(url: string): Promise<FetchResult> {
+export async function fetchWithFacebookbot(url: string, signal?: AbortSignal): Promise<FetchResult> {
     const userAgent = getRandomItem(FACEBOOK_USER_AGENTS);
 
     try {
         const response = await fetch(url, {
+            signal,
             headers: {
                 "User-Agent": userAgent,
                 "Referer": "https://www.facebook.com/",

@@ -1,9 +1,27 @@
 const GOOGLE_NEWS_BATCH_URL = "https://news.google.com/_/DotsSplashUi/data/batchexecute";
-const GOOGLE_NEWS_TIMEOUT_MS = 2200;
+const GOOGLE_NEWS_TIMEOUT_MS = 3000;
+const GOOGLE_NEWS_MAX_CONCURRENCY = 3;
 const GOOGLE_NEWS_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const GOOGLE_NEWS_CACHE_MAX = 1000;
 
 const decodedUrlCache = new Map<string, { url: string; expiresAt: number }>();
+const decodePromises = new Map<string, Promise<string | null>>();
+let activeDecodes = 0;
+const decodeWaiters: Array<() => void> = [];
+
+async function acquireDecodeSlot(): Promise<void> {
+    if (activeDecodes < GOOGLE_NEWS_MAX_CONCURRENCY) {
+        activeDecodes += 1;
+        return;
+    }
+    await new Promise<void>((resolve) => decodeWaiters.push(resolve));
+    activeDecodes += 1;
+}
+
+function releaseDecodeSlot(): void {
+    activeDecodes = Math.max(0, activeDecodes - 1);
+    decodeWaiters.shift()?.();
+}
 
 function getArticleId(sourceUrl: string): string | null {
     try {
@@ -59,13 +77,22 @@ function decodeLegacyArticleId(id: string): string | null {
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), GOOGLE_NEWS_TIMEOUT_MS);
-    try {
-        return await fetch(url, { ...init, signal: controller.signal });
-    } finally {
-        clearTimeout(timeout);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), GOOGLE_NEWS_TIMEOUT_MS);
+        try {
+            return await fetch(url, { ...init, signal: controller.signal });
+        } catch (error) {
+            if (attempt === 0) {
+                await new Promise((resolve) => setTimeout(resolve, 80));
+                continue;
+            }
+            throw error;
+        } finally {
+            clearTimeout(timeout);
+        }
     }
+    throw new Error("Google News request failed");
 }
 
 function buildBatchBody(id: string, timestamp: string, signature: string): string {
@@ -176,32 +203,49 @@ export async function decodeGoogleNewsUrl(sourceUrl: string): Promise<string | n
         return legacyUrl;
     }
 
-    const pageResponse = await fetchWithTimeout(sourceUrl, {
-        headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; URL2MD/2.5; +https://url2md.myh333777.deno.net)",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
-    });
-    if (!pageResponse.ok) return null;
+    const existing = decodePromises.get(id);
+    if (existing) return await existing;
 
-    const page = await pageResponse.text();
-    const signature = page.match(/data-n-a-sg="([^"]+)"/)?.[1];
-    const timestamp = page.match(/data-n-a-ts="([^"]+)"/)?.[1];
-    const pageId = page.match(/data-n-a-id="([^"]+)"/)?.[1] || id;
-    if (!signature || !timestamp) return null;
+    const promise = (async () => {
+        await acquireDecodeSlot();
+        try {
+            const pageResponse = await fetchWithTimeout(sourceUrl, {
+                headers: {
+                    "User-Agent": "Mozilla/5.0 (compatible; URL2MD/2.5; +https://url2md.myh333777.deno.net)",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+            });
+            if (!pageResponse.ok) return null;
 
-    const batchResponse = await fetchWithTimeout(GOOGLE_NEWS_BATCH_URL, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-            "Referer": "https://news.google.com/",
-            "User-Agent": "Mozilla/5.0 (compatible; URL2MD/2.5; +https://url2md.myh333777.deno.net)",
-        },
-        body: buildBatchBody(pageId, timestamp, signature),
-    });
-    if (!batchResponse.ok) return null;
+            const page = await pageResponse.text();
+            const signature = page.match(/data-n-a-sg="([^"]+)"/)?.[1];
+            const timestamp = page.match(/data-n-a-ts="([^"]+)"/)?.[1];
+            const pageId = page.match(/data-n-a-id="([^"]+)"/)?.[1] || id;
+            if (!signature || !timestamp) return null;
 
-    const decodedUrl = extractExternalUrl(await batchResponse.text());
-    if (decodedUrl) setCachedUrl(id, decodedUrl);
-    return decodedUrl;
+            const batchResponse = await fetchWithTimeout(GOOGLE_NEWS_BATCH_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                    "Referer": "https://news.google.com/",
+                    "User-Agent": "Mozilla/5.0 (compatible; URL2MD/2.5; +https://url2md.myh333777.deno.net)",
+                },
+                body: buildBatchBody(pageId, timestamp, signature),
+            });
+            if (!batchResponse.ok) return null;
+
+            const decodedUrl = extractExternalUrl(await batchResponse.text());
+            if (decodedUrl) setCachedUrl(id, decodedUrl);
+            return decodedUrl;
+        } finally {
+            releaseDecodeSlot();
+        }
+    })();
+
+    decodePromises.set(id, promise);
+    try {
+        return await promise;
+    } finally {
+        if (decodePromises.get(id) === promise) decodePromises.delete(id);
+    }
 }

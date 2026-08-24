@@ -38,12 +38,13 @@ export interface FetchResult {
     strategy: string;
 }
 
-export async function fetchWithGooglebot(url: string): Promise<FetchResult> {
+export async function fetchWithGooglebot(url: string, signal?: AbortSignal): Promise<FetchResult> {
     const userAgent = getRandomItem(GOOGLEBOT_USER_AGENTS);
     const forwardedIP = getRandomItem(GOOGLE_IPS);
 
     try {
         const response = await fetch(url, {
+            signal,
             headers: {
                 "User-Agent": userAgent,
                 "X-Forwarded-For": forwardedIP,
