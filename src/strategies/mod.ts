@@ -149,16 +149,25 @@ function isBlocked(html: string): boolean {
         /access denied/i,
         /403 forbidden/i,
         /robot check/i,
-        /captcha/i,
         /are you a robot/i,
         /prove you're human/i,
         /please verify you are/i,
-        /please verify you are/i,
+        /performing security verification/i,
+        /unusual activity from your computer network/i,
+        /data mine or scrape the content using automated means/i,
+        /text and data mining activities/i,
+        /content is made available for your personal, non-commercial use/i,
+        /client challenge/i,
+        /a required part of this site couldn.?t load/i,
         /opening this page/i, // Google News client-side redirect
         /<title>Google News<\/title>/i,
     ];
 
-    const text = html.slice(0, 5000).toLowerCase();
+    // Challenge pages usually identify themselves near the beginning, while
+    // some publishers append anti-automation notices at the very end of an
+    // otherwise large HTML document. Check both bounded edges instead of
+    // scanning megabytes of markup on every strategy attempt.
+    const text = `${html.slice(0, 10000)}\n${html.slice(-30000)}`.toLowerCase();
     return blockedPatterns.some(pattern => pattern.test(text));
 }
 
@@ -179,9 +188,16 @@ function isPaywalled(html: string): boolean {
         /you've reached your limit/i,
         /create.{0,10}an.{0,10}account/i,
         /start your free trial/i,
+        /subscribe.{0,20}to.{0,20}unlock/i,
+        /create.{0,30}account.{0,20}to.{0,20}unlock/i,
+        /unlock unlimited access/i,
+        /get full access.{0,80}(journalism|article)/i,
     ];
 
-    const text = html.slice(0, 10000);
+    // Reader services can prepend long navigation blocks before the actual
+    // subscription barrier. Scan a wider bounded prefix so those pages are
+    // not mistaken for full articles.
+    const text = html.slice(0, 50000);
     return paywallPatterns.some(pattern => pattern.test(text));
 }
 
@@ -247,12 +263,47 @@ async function executeStrategy(url: string, strategy: Strategy): Promise<FetchRe
 /**
  * Parallel fetch - race multiple strategies
  */
-async function fetchParallel(url: string, strategies: Strategy[]): Promise<FetchResult | JinaResult | null> {
+function recordAttempt(
+    attempts: Array<{ strategy: Strategy; error?: string }> | undefined,
+    strategy: Strategy,
+    error?: string,
+): void {
+    attempts?.push({ strategy, error });
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+    return Promise.race([
+        promise,
+        new Promise<T>((_, reject) =>
+            setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs)
+        ),
+    ]);
+}
+
+async function fetchParallel(
+    url: string,
+    strategies: Strategy[],
+    attempts?: Array<{ strategy: Strategy; error?: string }>,
+): Promise<FetchResult | JinaResult | null> {
     const promises = strategies.map(async (strategy) => {
-        const result = await executeStrategy(url, strategy);
+        let result;
+        try {
+            result = await executeStrategy(url, strategy);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            recordAttempt(attempts, strategy, message);
+            throw error;
+        }
 
         // Jina returns markdown, accept it if it has content
-        if ("markdown" in result && result.markdown && result.markdown.length > 100) {
+        if (
+            "markdown" in result &&
+            result.markdown &&
+            result.markdown.length > 100 &&
+            !isBlocked(result.markdown) &&
+            !isPaywalled(result.markdown) &&
+            !isGoogleErrorPage(result.markdown)
+        ) {
             return result;
         }
 
@@ -267,6 +318,7 @@ async function fetchParallel(url: string, strategies: Strategy[]): Promise<Fetch
             }
             return result;
         }
+        recordAttempt(attempts, strategy, result.error || "Rejected by content quality checks");
         throw new Error(result.error || "Failed");
     });
 
@@ -284,12 +336,30 @@ async function fetchParallel(url: string, strategies: Strategy[]): Promise<Fetch
  * These strategies are slower but more reliable, so we race them too
  * No HTML length check since Jina/Exa return markdown directly
  */
-async function fetchParallelFallback(url: string, strategies: Strategy[]): Promise<FetchResult | JinaResult | null> {
+async function fetchParallelFallback(
+    url: string,
+    strategies: Strategy[],
+    attempts?: Array<{ strategy: Strategy; error?: string }>,
+): Promise<FetchResult | JinaResult | null> {
     const promises = strategies.map(async (strategy) => {
-        const result = await executeStrategy(url, strategy);
+        let result;
+        try {
+            result = await withTimeout(executeStrategy(url, strategy), 8000, strategy);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            recordAttempt(attempts, strategy, message);
+            throw error;
+        }
 
         // Markdown-based strategies (Jina, Exa)
-        if ("markdown" in result && result.markdown && result.markdown.length > 100) {
+        if (
+            "markdown" in result &&
+            result.markdown &&
+            result.markdown.length > 100 &&
+            !isBlocked(result.markdown) &&
+            !isPaywalled(result.markdown) &&
+            !isGoogleErrorPage(result.markdown)
+        ) {
             console.log(`[Fallback:${strategy}] Markdown success, Length: ${result.markdown.length}`);
             return result;
         }
@@ -302,6 +372,7 @@ async function fetchParallelFallback(url: string, strategies: Strategy[]): Promi
             }
         }
 
+        recordAttempt(attempts, strategy, result.error || "Rejected by content quality checks");
         throw new Error(result.error || "Failed");
     });
 
@@ -344,7 +415,7 @@ export async function fetchWithStrategies(
             return createResult(result, "googlenews", attempts, startTime);
         }
 
-        console.log(`[Fetch] Google News decoder failed; stopping early`);
+        console.log(`[Fetch] Google News resolution/fetch failed; stopping early`);
         return createResult(result, "googlenews", attempts, startTime);
     }
 
@@ -375,17 +446,29 @@ export async function fetchWithStrategies(
 
     // 1. Small, domain-aware primary race.
     console.log(`[Fetch] Primary route: ${route.primary.join(", ")}`);
-    const parallelResult = await fetchParallel(url, route.primary as Strategy[]);
+    const parallelResult = await fetchParallel(url, route.primary as Strategy[], attempts);
 
     if (parallelResult && parallelResult.success) {
         console.log(`[Fetch] Parallel success with: ${parallelResult.strategy}`);
         return createResult(parallelResult, parallelResult.strategy as Strategy, attempts, startTime);
     }
 
-    // 2. One high-value fallback by default. This intentionally trades a small
-    // amount of coverage for much lower latency and fewer external requests.
+    // 2. One additional cheap crawler on misses. This recovers sites that
+    // selectively admit a social crawler without paying the cost on normal hits.
+    if (!route.primary.includes("facebookbot")) {
+        console.log(`[Fetch] Primary route failed; trying cheap secondary: facebookbot`);
+        const secondaryResult = await fetchParallel(url, ["facebookbot"], attempts);
+        if (secondaryResult && secondaryResult.success) {
+            console.log(`[Fetch] Secondary success with: ${secondaryResult.strategy}`);
+            return createResult(secondaryResult, secondaryResult.strategy as Strategy, attempts, startTime);
+        }
+    }
+
+    // 3. Bounded two-provider fallback race. It runs only after the cheap
+    // strategies fail, retaining most of the latency savings of the lean path
+    // while avoiding systematic blind spots where Exa or Jina alone fails.
     console.log(`[Fetch] Primary route failed; fallback: ${route.fallback.join(", ")}`);
-    const fallbackResult = await fetchParallelFallback(url, route.fallback as Strategy[]);
+    const fallbackResult = await fetchParallelFallback(url, route.fallback as Strategy[], attempts);
 
     if (fallbackResult && fallbackResult.success) {
         console.log(`[Fetch] Fallback parallel success with: ${fallbackResult.strategy}`);
