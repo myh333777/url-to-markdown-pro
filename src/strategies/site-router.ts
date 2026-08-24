@@ -9,6 +9,7 @@
 
 export type RoutedStrategy =
     | "direct"
+    | "bpc"
     | "googlebot"
     | "facebookbot"
     | "bingbot"
@@ -96,6 +97,13 @@ export function getSiteRoute(url: string): SiteRoute {
     // best speed/success tradeoff observed in production.
     if (matchesDomain(hostname, "reuters.com")) {
         return { primary: ["direct"], fallback: ["exa", "jina"] };
+    }
+
+    // Economist exposes the complete server-rendered article to the
+    // mobile/Liskov request profile used by Bypass Paywalls Clean. Prefer it
+    // directly instead of spending time on bot and reader fallbacks first.
+    if (matchesDomain(hostname, "economist.com")) {
+        return { primary: ["bpc"], fallback: ["exa", "jina"] };
     }
 
     if (matchesAny(hostname, GOOGLE_REFERER_DOMAINS)) {

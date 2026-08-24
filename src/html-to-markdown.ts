@@ -75,7 +75,7 @@ interface ArticleContent {
 type MainArticleContent = NonNullable<ReturnType<Readability["parse"]>>;
 
 // Turndown options - enhanced for better Markdown output
-const turndownOptions: TurndownService.Options = {
+const turndownOptions: NonNullable<ConstructorParameters<typeof TurndownService>[0]> = {
     headingStyle: "atx",
     bulletListMarker: "-",
     codeBlockStyle: "fenced",
@@ -100,7 +100,7 @@ function createTurndownService(preserveImages = true, baseUrl?: string): Turndow
         service.addRule("images", {
             filter: "img",
             replacement: (_content: string, node: Node) => {
-                const element = node as unknown as HTMLImageElement;
+                const element = node as unknown as Element;
                 // Priority: data-src > data-lazy-src > src (for lazy-loaded images)
                 const src = element.getAttribute("data-src")
                     || element.getAttribute("data-lazy-src")
@@ -127,7 +127,7 @@ function createTurndownService(preserveImages = true, baseUrl?: string): Turndow
         service.addRule("figure", {
             filter: "figure",
             replacement: (content: string, node: Node) => {
-                const element = node as unknown as HTMLElement;
+                const element = node as unknown as Element;
                 const img = element.querySelector("img");
                 const figcaption = element.querySelector("figcaption");
 
@@ -214,9 +214,9 @@ const extractArticleContent = (
  */
 const htmlTextToMarkdown = (html: string, preserveImages = true, baseUrl?: string): string => {
     // Polyfill DOMParser for Turndown in Deno environment
-    if (!globalThis.DOMParser) {
-        // @ts-ignore - assigning to global
-        globalThis.DOMParser = DOMParser;
+    const globals = globalThis as typeof globalThis & { DOMParser?: typeof DOMParser };
+    if (!globals.DOMParser) {
+        globals.DOMParser = DOMParser;
     }
 
     // Convert to Markdown with base URL for resolving relative paths

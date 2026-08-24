@@ -12,7 +12,7 @@
 
 import { McpServer } from "npm:@modelcontextprotocol/sdk@1.11.0/server/mcp.js";
 import { Transport } from "npm:@modelcontextprotocol/sdk@1.11.0/shared/transport.js";
-import { JSONRPCMessage, JSONRPCMessageSchema, JSONRPCResponse, JSONRPCError } from "npm:@modelcontextprotocol/sdk@1.11.0/types.js";
+import { JSONRPCMessage, JSONRPCMessageSchema, JSONRPCResponse } from "npm:@modelcontextprotocol/sdk@1.11.0/types.js";
 import { registerTools } from "./tools.ts";
 
 // Session storage for stateful connections
@@ -158,7 +158,7 @@ export async function handleStreamableRequest(request: Request): Promise<Respons
         const errorMessage = error instanceof Error ? error.message : String(error);
         console.error("[Streamable] Error:", errorMessage);
 
-        const errorResponse: JSONRPCError = {
+        const errorResponse = {
             jsonrpc: "2.0",
             id: null,
             error: {
