@@ -55,7 +55,7 @@ async function decodeResponseWrapper(response: Response): Promise<string> {
 
 const PRIMARY_HEDGE_DELAY_MS = 180;
 const FALLBACK_HEDGE_DELAY_MS = 180;
-const FALLBACK_TIMEOUT_MS = 10000;
+const FALLBACK_TIMEOUT_MS = 8000;
 
 /**
  * Clean Jina/Exa output (remove metadata headers)
@@ -593,7 +593,10 @@ export async function fetchWithStrategies(
     // If specific strategy requested, use it directly (bypass parallel race)
     if (strategy && strategy !== "custom" && strategy !== "auto") {
         console.log(`[Fetch] Using explicit strategy: ${strategy}`);
-        const result = await executeStrategy(url, strategy);
+        const signal = ["jina", "exa", "archive", "12ft"].includes(strategy)
+            ? AbortSignal.timeout(FALLBACK_TIMEOUT_MS)
+            : undefined;
+        const result = await executeStrategy(url, strategy, signal);
         try {
             return createResult(validateStrategyResult(result, strategy), strategy, attempts, startTime);
         } catch (error) {
