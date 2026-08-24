@@ -18,6 +18,7 @@ export { fetchWithFacebookbot } from "./facebookbot.ts";
 export { fetchWithBingbot } from "./bingbot.ts";
 export { fetchWithExa } from "./exa.ts";
 export { fetchWithGoogleReferer } from "./google-referer.ts";
+export { fetchWithBpcProfile } from "./bpc.ts";
 
 import { fetchWithGooglebot, type FetchResult } from "./googlebot.ts";
 import { fetchFromArchive } from "./archive.ts";
@@ -27,12 +28,13 @@ import { fetchWithFacebookbot } from "./facebookbot.ts";
 import { fetchWithBingbot } from "./bingbot.ts";
 import { fetchWithExa } from "./exa.ts";
 import { fetchWithGoogleReferer } from "./google-referer.ts";
+import { fetchWithBpcProfile } from "./bpc.ts";
 import { getSiteRoute } from "./site-router.ts";
 import { decodeGoogleNewsUrl } from "./google-news-decoder.ts";
 
 import { decodeResponse } from "../utils.ts";
 
-export type Strategy = "direct" | "googlebot" | "facebookbot" | "bingbot" | "google-referer" | "archive" | "12ft" | "jina" | "exa" | "googlenews";
+export type Strategy = "direct" | "bpc" | "googlebot" | "facebookbot" | "bingbot" | "google-referer" | "archive" | "12ft" | "jina" | "exa" | "googlenews";
 
 export interface MultiStrategyResult {
     success: boolean;
@@ -388,6 +390,8 @@ async function executeStrategy(
     switch (strategy) {
         case "direct":
             return await fetchDirect(url, signal);
+        case "bpc":
+            return await fetchWithBpcProfile(url, signal);
         case "googlebot":
             return await fetchWithGooglebot(url, signal);
         case "facebookbot":

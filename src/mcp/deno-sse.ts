@@ -166,7 +166,7 @@ export function closeSession(sessionId: string): void {
  * Deno SSE Transport - implements MCP Transport interface
  */
 export class DenoSSETransport implements Transport {
-    private sessionId: string;
+    readonly sessionId: string;
     private _onmessage?: (message: JSONRPCMessage) => void;
     private _onclose?: () => void;
     private _onerror?: (error: Error) => void;
