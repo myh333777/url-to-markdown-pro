@@ -190,7 +190,7 @@ function isPaywalled(html: string): boolean {
         /id="[^"]*paywall[^"]*"/i,
         /subscribe.{0,20}to.{0,20}continue/i,
         /sign.{0,10}up.{0,20}to.{0,20}read/i,
-        /premium.{0,20}content/i,
+        /premium\s+(?:article|content)/i,
         /members?.{0,10}only/i,
         /login.{0,20}to.{0,20}view/i,
         /data-paywall/i,
@@ -251,6 +251,15 @@ function isReutersUrl(url: string): boolean {
     }
 }
 
+function isBloombergUrl(url: string): boolean {
+    try {
+        const hostname = new URL(url).hostname.toLowerCase();
+        return hostname === "bloomberg.com" || hostname.endsWith(".bloomberg.com");
+    } catch {
+        return false;
+    }
+}
+
 function getReutersSearchTitle(url: string): string | null {
     try {
         const slug = new URL(url).pathname.split("/").filter(Boolean).at(-1);
@@ -261,6 +270,16 @@ function getReutersSearchTitle(url: string): string | null {
             .split("-")
             .filter(Boolean)
             .join(" ");
+    } catch {
+        return null;
+    }
+}
+
+function getBloombergSearchTitle(url: string): string | null {
+    try {
+        const slug = new URL(url).pathname.split("/").filter(Boolean).at(-1);
+        if (!slug) return null;
+        return slug.split("-").filter(Boolean).join(" ");
     } catch {
         return null;
     }
@@ -301,14 +320,95 @@ function titleCoverage(expected: string, candidate: string): number {
     return matches / expectedTokens.size;
 }
 
-async function fetchReutersSyndicated(
+interface SyndicatedSpec {
+    label: "Reuters" | "Bloomberg";
+    title: string;
+    isOriginalUrl: (url: string) => boolean;
+    sourcePattern: RegExp;
+}
+
+function getSyndicatedSpec(url: string): SyndicatedSpec | null {
+    if (isReutersUrl(url)) {
+        const title = getReutersSearchTitle(url);
+        return title
+            ? {
+                label: "Reuters",
+                title,
+                isOriginalUrl: isReutersUrl,
+                sourcePattern: /\breuters\b/i,
+            }
+            : null;
+    }
+
+    if (isBloombergUrl(url)) {
+        const title = getBloombergSearchTitle(url);
+        return title
+            ? {
+                label: "Bloomberg",
+                title,
+                isOriginalUrl: isBloombergUrl,
+                sourcePattern: /\bbloomberg\b/i,
+            }
+            : null;
+    }
+
+    return null;
+}
+
+function syndicatedSourceScore(spec: SyndicatedSpec, source: string): number {
+    if (spec.label === "Bloomberg") {
+        if (/yahoo|aol|straits times|daily gazette/i.test(source)) return 0;
+        if (/tradingview|japan times/i.test(source)) return 1;
+        return 2;
+    }
+
+    if (/yahoo|tradingview|forex factory|aol/i.test(source)) return 0;
+    if (/bloomberg|wall street journal|financial times|economist|barron|marketwatch/i.test(source)) return 2;
+    return 1;
+}
+
+function hasSyndicatedAttribution(
+    spec: SyndicatedSpec,
+    result: MultiStrategyResult,
+): boolean {
+    if (result.html) {
+        const raw = result.html.slice(0, 1_500_000);
+        if (spec.label === "Bloomberg") {
+            if (/\(Bloomberg\)\s*(?:--|[-–—])/i.test(raw)) return true;
+            if (/"provider"\s*:\s*\{[^}]{0,500}"name"\s*:\s*"Bloomberg"/i.test(raw)) return true;
+            if (/<meta[^>]+name=["']author["'][^>]+content=["'][^"']*Bloomberg News/i.test(raw)) return true;
+        } else {
+            if (/\(Reuters\)\s*(?:--|[-–—])/i.test(raw)) return true;
+            if (/<meta[^>]+name=["']author["'][^>]+content=["'][^"']*Reuters/i.test(raw)) return true;
+        }
+    }
+
+    let text = result.markdown || "";
+    if (!text && result.html) {
+        text = result.html.slice(0, 250000)
+            .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+            .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+            .replace(/<[^>]+>/g, " ")
+            .replace(/\s+/g, " ");
+    }
+    text = text.slice(0, 12000);
+
+    if (spec.label === "Bloomberg") {
+        return /\(Bloomberg\)\s*--/i.test(text) ||
+            /\bby\b.{0,240}\bBloomberg(?:\s+News)?\b/i.test(text);
+    }
+    return /\bby\b.{0,160}\bReuters\b/i.test(text) ||
+        /\(Reuters\)\s*[-–—]/i.test(text);
+}
+
+async function fetchSyndicatedCopy(
     url: string,
     attempts: Array<{ strategy: Strategy; error?: string }>,
 ): Promise<MultiStrategyResult | null> {
-    const title = getReutersSearchTitle(url);
-    if (!title) return null;
+    const spec = getSyndicatedSpec(url);
+    if (!spec) return null;
 
-    const query = encodeURIComponent(title);
+    const query = encodeURIComponent(spec.title);
     const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=en-US&gl=US&ceid=US:en`;
     let xml = "";
     try {
@@ -338,16 +438,9 @@ async function fetchReutersSyndicated(
                 : null;
         })
         .filter((candidate): candidate is { link: string; title: string; source: string } => Boolean(candidate))
-        .filter((candidate) => !/\breuters\b/i.test(candidate.source))
-        .filter((candidate) => titleCoverage(title, candidate.title) >= 0.65)
-        .sort((a, b) => {
-            const score = (candidate: { source: string }) => {
-                if (/yahoo|tradingview|forex factory|aol/i.test(candidate.source)) return 0;
-                if (/bloomberg|wall street journal|financial times|economist|barron|marketwatch/i.test(candidate.source)) return 2;
-                return 1;
-            };
-            return score(a) - score(b);
-        });
+        .filter((candidate) => !spec.sourcePattern.test(candidate.source))
+        .filter((candidate) => titleCoverage(spec.title, candidate.title) >= 0.65)
+        .sort((a, b) => syndicatedSourceScore(spec, a.source) - syndicatedSourceScore(spec, b.source));
 
     for (const candidate of candidates) {
         let resolved: string | null = null;
@@ -356,7 +449,7 @@ async function fetchReutersSyndicated(
         } catch {
             continue;
         }
-        if (!resolved || isReutersUrl(resolved)) continue;
+        if (!resolved || spec.isOriginalUrl(resolved)) continue;
 
         try {
             const result = await fetchWithStrategies(resolved, {
@@ -364,8 +457,8 @@ async function fetchReutersSyndicated(
                 strategy: undefined,
                 allowSyndicated: false,
             });
-            if (result.success) {
-                console.log(`[Reuters] Recovered via syndicated source: ${resolved}`);
+            if (result.success && hasSyndicatedAttribution(spec, result)) {
+                console.log(`[${spec.label}] Recovered via syndicated source: ${resolved}`);
                 return {
                     ...result,
                     resolvedUrl: resolved,
@@ -670,8 +763,8 @@ export async function fetchWithStrategies(
         return createResult(parallelResult, parallelResult.strategy as Strategy, attempts, startTime);
     }
 
-    if (allowSyndicated && isReutersUrl(url)) {
-        const syndicatedResult = await fetchReutersSyndicated(url, attempts);
+    if (allowSyndicated && (isReutersUrl(url) || isBloombergUrl(url))) {
+        const syndicatedResult = await fetchSyndicatedCopy(url, attempts);
         if (syndicatedResult?.success) {
             return {
                 ...syndicatedResult,
