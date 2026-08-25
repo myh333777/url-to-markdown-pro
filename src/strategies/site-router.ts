@@ -10,6 +10,7 @@
 export type RoutedStrategy =
     | "direct"
     | "bpc"
+    | "tls"
     | "googlebot"
     | "facebookbot"
     | "bingbot"
@@ -99,11 +100,25 @@ export function getSiteRoute(url: string): SiteRoute {
         return { primary: ["direct"], fallback: ["exa", "jina"] };
     }
 
+    // Bloomberg frequently has same-title licensed copies on Yahoo Finance.
+    // Probe the source once, then let the syndicated-copy resolver run before
+    // expensive reader fallbacks.
+    if (matchesDomain(hostname, "bloomberg.com")) {
+        return { primary: ["direct"], fallback: ["exa", "jina"] };
+    }
+
     // Economist exposes the complete server-rendered article to the
     // mobile/Liskov request profile used by Bypass Paywalls Clean. Prefer it
     // directly instead of spending time on bot and reader fallbacks first.
     if (matchesDomain(hostname, "economist.com")) {
         return { primary: ["bpc"], fallback: ["exa", "jina"] };
+    }
+
+    // Science.org distinguishes non-browser TLS/HTTP2 fingerprints. Firefox
+    // impersonation retrieves the normal server-rendered article without a
+    // heavyweight browser process.
+    if (matchesDomain(hostname, "science.org")) {
+        return { primary: ["tls"], fallback: ["exa", "jina"] };
     }
 
     if (matchesAny(hostname, GOOGLE_REFERER_DOMAINS)) {

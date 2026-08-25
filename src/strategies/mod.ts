@@ -19,6 +19,7 @@ export { fetchWithBingbot } from "./bingbot.ts";
 export { fetchWithExa } from "./exa.ts";
 export { fetchWithGoogleReferer } from "./google-referer.ts";
 export { fetchWithBpcProfile } from "./bpc.ts";
+export { fetchWithTlsProfile } from "./tls.ts";
 
 import { fetchWithGooglebot, type FetchResult } from "./googlebot.ts";
 import { fetchFromArchive } from "./archive.ts";
@@ -29,12 +30,13 @@ import { fetchWithBingbot } from "./bingbot.ts";
 import { fetchWithExa } from "./exa.ts";
 import { fetchWithGoogleReferer } from "./google-referer.ts";
 import { fetchWithBpcProfile } from "./bpc.ts";
+import { fetchWithTlsProfile } from "./tls.ts";
 import { getSiteRoute } from "./site-router.ts";
 import { decodeGoogleNewsUrl } from "./google-news-decoder.ts";
 
 import { decodeResponse } from "../utils.ts";
 
-export type Strategy = "direct" | "bpc" | "googlebot" | "facebookbot" | "bingbot" | "google-referer" | "archive" | "12ft" | "jina" | "exa" | "googlenews";
+export type Strategy = "direct" | "bpc" | "tls" | "googlebot" | "facebookbot" | "bingbot" | "google-referer" | "archive" | "12ft" | "jina" | "exa" | "googlenews";
 
 export interface MultiStrategyResult {
     success: boolean;
@@ -250,6 +252,24 @@ function isReutersUrl(url: string): boolean {
     }
 }
 
+function isBloombergUrl(url: string): boolean {
+    try {
+        const hostname = new URL(url).hostname.toLowerCase();
+        return hostname === "bloomberg.com" || hostname.endsWith(".bloomberg.com");
+    } catch {
+        return false;
+    }
+}
+
+function isYahooUrl(url: string): boolean {
+    try {
+        const hostname = new URL(url).hostname.toLowerCase();
+        return hostname === "yahoo.com" || hostname.endsWith(".yahoo.com");
+    } catch {
+        return false;
+    }
+}
+
 function getReutersSearchTitle(url: string): string | null {
     try {
         const slug = new URL(url).pathname.split("/").filter(Boolean).at(-1);
@@ -260,6 +280,16 @@ function getReutersSearchTitle(url: string): string | null {
             .split("-")
             .filter(Boolean)
             .join(" ");
+    } catch {
+        return null;
+    }
+}
+
+function getBloombergSearchTitle(url: string): string | null {
+    try {
+        const slug = new URL(url).pathname.split("/").filter(Boolean).at(-1);
+        if (!slug) return null;
+        return slug.split("-").filter(Boolean).join(" ");
     } catch {
         return null;
     }
@@ -300,6 +330,24 @@ function titleCoverage(expected: string, candidate: string): number {
     return matches / expectedTokens.size;
 }
 
+function matchesSyndicatedProvider(
+    result: MultiStrategyResult,
+    provider: "Reuters" | "Bloomberg",
+): boolean {
+    const content = result.html || result.markdown || "";
+    if (!content) return false;
+
+    const escapedProvider = provider.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const providerPattern = new RegExp(`"cbe"\\s*:\\s*"${escapedProvider}"`, "i");
+    if (providerPattern.test(content)) return true;
+
+    const prefix = content.slice(0, 10000);
+    if (provider === "Reuters") {
+        return /(?:\bBy\s+Reuters\b|\(Reuters\))/i.test(prefix);
+    }
+    return /(?:\bBy\s+Bloomberg\b|\(Bloomberg\)\s*--)/i.test(prefix);
+}
+
 async function fetchReutersSyndicated(
     url: string,
     attempts: Array<{ strategy: Strategy; error?: string }>,
@@ -338,10 +386,11 @@ async function fetchReutersSyndicated(
         })
         .filter((candidate): candidate is { link: string; title: string; source: string } => Boolean(candidate))
         .filter((candidate) => !/\breuters\b/i.test(candidate.source))
+        .filter((candidate) => !/tradingview|forex factory|aol/i.test(candidate.source))
         .filter((candidate) => titleCoverage(title, candidate.title) >= 0.65)
         .sort((a, b) => {
             const score = (candidate: { source: string }) => {
-                if (/yahoo|tradingview|forex factory|aol/i.test(candidate.source)) return 0;
+                if (/yahoo/i.test(candidate.source)) return 0;
                 if (/bloomberg|wall street journal|financial times|economist|barron|marketwatch/i.test(candidate.source)) return 2;
                 return 1;
             };
@@ -363,7 +412,7 @@ async function fetchReutersSyndicated(
                 strategy: undefined,
                 allowSyndicated: false,
             });
-            if (result.success) {
+            if (result.success && (!isYahooUrl(resolved) || matchesSyndicatedProvider(result, "Reuters"))) {
                 console.log(`[Reuters] Recovered via syndicated source: ${resolved}`);
                 return {
                     ...result,
@@ -373,6 +422,77 @@ async function fetchReutersSyndicated(
             }
         } catch {
             // Try the next syndicated candidate.
+        }
+    }
+
+    return null;
+}
+
+async function fetchBloombergSyndicated(
+    url: string,
+    attempts: Array<{ strategy: Strategy; error?: string }>,
+): Promise<MultiStrategyResult | null> {
+    const title = getBloombergSearchTitle(url);
+    if (!title) return null;
+
+    const query = encodeURIComponent(title);
+    const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=en-US&gl=US&ceid=US:en`;
+    let xml = "";
+    try {
+        const response = await fetch(rssUrl, {
+            signal: AbortSignal.timeout(2500),
+            headers: { "User-Agent": "URL2MD/2.5" },
+        });
+        if (!response.ok) return null;
+        xml = await response.text();
+    } catch {
+        return null;
+    }
+
+    const candidates = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)]
+        .slice(0, 12)
+        .map((match) => {
+            const item = match[1];
+            const link = item.match(/<link>([\s\S]*?)<\/link>/)?.[1];
+            const itemTitle = item.match(/<title>([\s\S]*?)<\/title>/)?.[1] || "";
+            const source = item.match(/<source[^>]*>([\s\S]*?)<\/source>/)?.[1] || "";
+            return link
+                ? {
+                    link: decodeXmlText(link.trim()),
+                    title: decodeXmlText(itemTitle.trim()),
+                    source: decodeXmlText(source.trim()),
+                }
+                : null;
+        })
+        .filter((candidate): candidate is { link: string; title: string; source: string } => Boolean(candidate))
+        .filter((candidate) => /yahoo/i.test(candidate.source))
+        .filter((candidate) => titleCoverage(title, candidate.title) >= 0.75);
+
+    for (const candidate of candidates) {
+        let resolved: string | null = null;
+        try {
+            resolved = await decodeGoogleNewsUrl(candidate.link);
+        } catch {
+            continue;
+        }
+        if (!resolved || !isYahooUrl(resolved)) continue;
+
+        try {
+            const result = await fetchWithStrategies(resolved, {
+                bypass: true,
+                strategy: undefined,
+                allowSyndicated: false,
+            });
+            if (result.success && matchesSyndicatedProvider(result, "Bloomberg")) {
+                console.log(`[Bloomberg] Recovered via Yahoo syndicated source: ${resolved}`);
+                return {
+                    ...result,
+                    resolvedUrl: resolved,
+                    attempts,
+                };
+            }
+        } catch {
+            // Try the next Yahoo candidate.
         }
     }
 
@@ -392,6 +512,8 @@ async function executeStrategy(
             return await fetchDirect(url, signal);
         case "bpc":
             return await fetchWithBpcProfile(url, signal);
+        case "tls":
+            return await fetchWithTlsProfile(url, signal);
         case "googlebot":
             return await fetchWithGooglebot(url, signal);
         case "facebookbot":
@@ -667,6 +789,16 @@ export async function fetchWithStrategies(
 
     if (allowSyndicated && isReutersUrl(url)) {
         const syndicatedResult = await fetchReutersSyndicated(url, attempts);
+        if (syndicatedResult?.success) {
+            return {
+                ...syndicatedResult,
+                elapsed: Date.now() - startTime,
+            };
+        }
+    }
+
+    if (allowSyndicated && isBloombergUrl(url)) {
+        const syndicatedResult = await fetchBloombergSyndicated(url, attempts);
         if (syndicatedResult?.success) {
             return {
                 ...syndicatedResult,

@@ -12,7 +12,7 @@ export interface DenoSSESession {
     messageQueue: JSONRPCMessage[];
     onMessage?: (message: JSONRPCMessage) => Promise<void>;
     closed: boolean;
-    heartbeatTimer?: number;  // Heartbeat timer ID
+    heartbeatTimer?: ReturnType<typeof setInterval>;  // Heartbeat timer ID
 }
 
 const sessions = new Map<string, DenoSSESession>();

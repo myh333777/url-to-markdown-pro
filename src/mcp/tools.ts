@@ -20,7 +20,7 @@ export function registerTools(server: McpServer): void {
             url: z.string().url().describe("The URL to fetch and convert to Markdown"),
             bypass: z.boolean().optional().default(true).describe("Enable automatic multi-strategy fetch for best results (recommended)"),
             preserveImages: z.boolean().optional().default(true).describe("Preserve images in the Markdown output"),
-            strategy: z.enum(["direct", "bpc", "googlebot", "facebookbot", "bingbot", "archive", "12ft", "jina", "exa"]).optional().describe("Specific fetch strategy to use"),
+            strategy: z.enum(["direct", "bpc", "tls", "googlebot", "facebookbot", "bingbot", "archive", "12ft", "jina", "exa"]).optional().describe("Specific fetch strategy to use"),
         },
         async ({ url, bypass, preserveImages, strategy }) => {
             try {
