@@ -19,6 +19,7 @@ export { fetchWithBingbot } from "./bingbot.ts";
 export { fetchWithExa } from "./exa.ts";
 export { fetchWithGoogleReferer } from "./google-referer.ts";
 export { fetchWithBpcProfile } from "./bpc.ts";
+export { fetchWithWreq } from "./wreq.ts";
 
 import { fetchWithGooglebot, type FetchResult } from "./googlebot.ts";
 import { fetchFromArchive } from "./archive.ts";
@@ -34,7 +35,7 @@ import { decodeGoogleNewsUrl } from "./google-news-decoder.ts";
 
 import { decodeResponse } from "../utils.ts";
 
-export type Strategy = "direct" | "bpc" | "googlebot" | "facebookbot" | "bingbot" | "google-referer" | "archive" | "12ft" | "jina" | "exa" | "googlenews";
+export type Strategy = "direct" | "bpc" | "wreq" | "googlebot" | "facebookbot" | "bingbot" | "google-referer" | "archive" | "12ft" | "jina" | "exa" | "googlenews";
 
 export interface MultiStrategyResult {
     success: boolean;
@@ -392,6 +393,10 @@ async function executeStrategy(
             return await fetchDirect(url, signal);
         case "bpc":
             return await fetchWithBpcProfile(url, signal);
+        case "wreq": {
+            const { fetchWithWreq } = await import("./wreq.ts");
+            return await fetchWithWreq(url, signal);
+        }
         case "googlebot":
             return await fetchWithGooglebot(url, signal);
         case "facebookbot":
@@ -597,7 +602,7 @@ export async function fetchWithStrategies(
     // If specific strategy requested, use it directly (bypass parallel race)
     if (strategy && strategy !== "custom" && strategy !== "auto") {
         console.log(`[Fetch] Using explicit strategy: ${strategy}`);
-        const signal = ["jina", "exa", "archive", "12ft"].includes(strategy)
+        const signal = ["wreq", "jina", "exa", "archive", "12ft"].includes(strategy)
             ? AbortSignal.timeout(FALLBACK_TIMEOUT_MS)
             : undefined;
         const result = await executeStrategy(url, strategy, signal);

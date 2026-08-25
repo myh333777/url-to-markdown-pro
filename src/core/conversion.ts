@@ -12,6 +12,7 @@ import {
     type FetchResponse,
 } from "../utils.ts";
 import type { Strategy } from "../strategies/mod.ts";
+import { supportsWreqUrl } from "../strategies/site-router.ts";
 import { extractFromJsonLd } from "../jsonld.ts";
 
 // ============== URL Cache (DISABLED) ==============
@@ -311,7 +312,10 @@ async function performConversion(url: string, options: ConversionOptions): Promi
 
         const rescueUrl = fetchResult.resolvedUrl || url;
         let rescued: { result: CacheEntry; quality: number } | null = null;
-        for (const rescueStrategy of ["jina", "exa"] as const) {
+        const rescueStrategies: Strategy[] = supportsWreqUrl(rescueUrl)
+            ? ["wreq", "jina", "exa"]
+            : ["jina", "exa"];
+        for (const rescueStrategy of rescueStrategies) {
             if (fetchResult.strategy === rescueStrategy) continue;
             const rescueStartedAt = Date.now();
             const candidate = await fetchHtmlWithStrategies(rescueUrl, {

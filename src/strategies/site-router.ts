@@ -10,6 +10,7 @@
 export type RoutedStrategy =
     | "direct"
     | "bpc"
+    | "wreq"
     | "googlebot"
     | "facebookbot"
     | "bingbot"
@@ -73,6 +74,15 @@ const GOOGLE_REFERER_DOMAINS = new Set([
     "investorschronicle.co.uk",
 ]);
 
+const WREQ_DOMAINS = new Set([
+    "fastcompany.com",
+    "morningstar.com",
+    "pbs.org",
+    "reuters.com",
+    "thehill.com",
+    "euronews.com",
+]);
+
 function matchesDomain(hostname: string, domain: string): boolean {
     return hostname === domain || hostname.endsWith(`.${domain}`);
 }
@@ -92,11 +102,11 @@ export function getSiteRoute(url: string): SiteRoute {
         return { primary: ["direct"], fallback: ["exa", "jina"] };
     }
 
-    // Reuters currently rejects data-center crawlers with DataDome 401.
-    // A quick direct probe followed by Exa's syndicated-copy recovery is the
-    // best speed/success tradeoff observed in production.
+    // Reuters rejects ordinary data-center HTTP clients but accepts a request
+    // with a genuine Chrome TLS/HTTP2 fingerprint. Prefer that low-cost path
+    // before the syndicated-copy recovery below.
     if (matchesDomain(hostname, "reuters.com")) {
-        return { primary: ["direct"], fallback: ["exa", "jina"] };
+        return { primary: ["wreq"], fallback: ["exa", "jina"] };
     }
 
     // Economist exposes the complete server-rendered article to the
@@ -104,6 +114,10 @@ export function getSiteRoute(url: string): SiteRoute {
     // directly instead of spending time on bot and reader fallbacks first.
     if (matchesDomain(hostname, "economist.com")) {
         return { primary: ["bpc"], fallback: ["exa", "jina"] };
+    }
+
+    if (matchesAny(hostname, WREQ_DOMAINS)) {
+        return { primary: ["direct", "wreq"], fallback: ["exa", "jina"] };
     }
 
     if (matchesAny(hostname, GOOGLE_REFERER_DOMAINS)) {
@@ -125,4 +139,12 @@ export function getSiteRoute(url: string): SiteRoute {
         primary: ["direct", "bingbot", "googlebot"],
         fallback: ["exa", "jina"],
     };
+}
+
+export function supportsWreqUrl(url: string): boolean {
+    try {
+        return matchesAny(new URL(url).hostname.toLowerCase(), WREQ_DOMAINS);
+    } catch {
+        return false;
+    }
 }
