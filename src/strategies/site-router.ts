@@ -22,6 +22,8 @@ export interface SiteRoute {
     primary: RoutedStrategy[];
     fallback: RoutedStrategy[];
 }
+
+import { hasBpcCustomUserAgentProfile } from "./bpc.ts";
 const GOOGLEBOT_DOMAINS = new Set([
     "berliner-zeitung.de",
     "businessinsider.com",
@@ -109,10 +111,10 @@ export function getSiteRoute(url: string): SiteRoute {
         return { primary: ["wreq"], fallback: ["exa", "jina"] };
     }
 
-    // Economist exposes the complete server-rendered article to the
-    // mobile/Liskov request profile used by Bypass Paywalls Clean. Prefer it
-    // directly instead of spending time on bot and reader fallbacks first.
-    if (matchesDomain(hostname, "economist.com")) {
+    // BPC custom User-Agent rules expose deliberate alternate publisher views.
+    // This is a verified full-text win for Economist and Haaretz and avoids
+    // wasting requests on known blocked/truncated public variants.
+    if (hasBpcCustomUserAgentProfile(url)) {
         return { primary: ["bpc"], fallback: ["exa", "jina"] };
     }
 

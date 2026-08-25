@@ -29,7 +29,7 @@ import { fetchWithFacebookbot } from "./facebookbot.ts";
 import { fetchWithBingbot } from "./bingbot.ts";
 import { fetchWithExa } from "./exa.ts";
 import { fetchWithGoogleReferer } from "./google-referer.ts";
-import { fetchWithBpcProfile } from "./bpc.ts";
+import { fetchWithBpcProfile, hasBpcRequestProfile } from "./bpc.ts";
 import { getSiteRoute } from "./site-router.ts";
 import { decodeGoogleNewsUrl } from "./google-news-decoder.ts";
 
@@ -770,6 +770,19 @@ export async function fetchWithStrategies(
                 ...syndicatedResult,
                 elapsed: Date.now() - startTime,
             };
+        }
+    }
+
+    // BPC's pure-HTTP rules are a cheap secondary recovery layer. Do not race
+    // them against a working public page: several publishers serve direct
+    // requests normally but reject crawler/referer variants. Custom-UA rules
+    // are already routed as primary by site-router.ts and are skipped here.
+    if (!route.primary.includes("bpc") && hasBpcRequestProfile(url)) {
+        console.log(`[Fetch] Primary route failed; trying BPC HTTP profile`);
+        const bpcResult = await fetchHedged(url, ["bpc"], attempts, 0);
+        if (bpcResult?.success) {
+            console.log(`[Fetch] BPC HTTP profile succeeded`);
+            return createResult(bpcResult, "bpc", attempts, startTime);
         }
     }
 
