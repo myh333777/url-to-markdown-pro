@@ -74,6 +74,7 @@ export interface FetchOptions {
 export interface FetchResponse {
     html?: string;
     markdown?: string;  // Direct markdown from Jina
+    title?: string;
     resolvedUrl?: string;
     strategy: Strategy;
     success: boolean;
@@ -133,6 +134,7 @@ export const fetchHtmlWithStrategies = async (
     return {
         html: result.html,
         markdown: result.markdown,
+        title: result.title,
         resolvedUrl: result.resolvedUrl,
         strategy: result.strategy,
         success: result.success,
@@ -148,6 +150,10 @@ const addCorsHeaders = (headers: Headers, domain = "*"): Headers => {
     headers.set("Access-Control-Allow-Origin", domain);
     headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Content-Type");
+    headers.set(
+        "Access-Control-Expose-Headers",
+        "X-Strategy-Used, X-Elapsed-Ms, X-From-Cache, X-Resolved-URL, X-Content-Quality, X-Hero-Image, X-Image-Count, Server-Timing",
+    );
     return headers;
 };
 

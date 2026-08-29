@@ -1,5 +1,5 @@
 import { indexHtml } from "./src/index-template.ts";
-console.log("[Init] Starting url-to-markdown v2.5.0");
+console.log("[Init] Starting url-to-markdown v2.6.0");
 
 import { McpServer } from "npm:@modelcontextprotocol/sdk@1.11.0/server/mcp.js";
 import { registerTools } from "./src/mcp/tools.ts";
@@ -30,7 +30,7 @@ const mcpServers = new Map<string, McpServer>();
 function createMcpServerForSession(sessionId: string): McpServer {
     const server = new McpServer({
         name: "url-to-markdown",
-        version: "2.5.0",
+        version: "2.6.0",
     });
     registerTools(server);
     mcpServers.set(sessionId, server);
@@ -48,9 +48,11 @@ Deno.serve(async (request: Request) => {
                     JSON.stringify({
                         status: "healthy",
                         service: "url-to-markdown",
-                        version: "2.5.0",
+                        version: "2.6.0",
                         features: [
                             "parallel_fetch",
+                            "short_link_resolution",
+                            "article_image_metadata",
                             "json_ld",
                             "readability",
                             "turndown_gfm",
@@ -106,6 +108,10 @@ Deno.serve(async (request: Request) => {
                     headers.set("X-Elapsed-Ms", String(result.elapsed));
                     headers.set("X-From-Cache", String(result.fromCache));
                     if (result.resolvedUrl) headers.set("X-Resolved-URL", result.resolvedUrl);
+                    if (result.images?.hero) headers.set("X-Hero-Image", result.images.hero);
+                    if (result.images?.candidates?.length) {
+                        headers.set("X-Image-Count", String(result.images.candidates.length));
+                    }
                     if (result.quality !== undefined) headers.set("X-Content-Quality", String(result.quality));
                     if (result.timings) {
                         headers.set(
@@ -197,6 +203,10 @@ Deno.serve(async (request: Request) => {
                 headers.set("X-Elapsed-Ms", String(result.elapsed));
                 headers.set("X-From-Cache", String(result.fromCache));
                 if (result.resolvedUrl) headers.set("X-Resolved-URL", result.resolvedUrl);
+                if (result.images?.hero) headers.set("X-Hero-Image", result.images.hero);
+                if (result.images?.candidates?.length) {
+                    headers.set("X-Image-Count", String(result.images.candidates.length));
+                }
                 if (result.quality !== undefined) headers.set("X-Content-Quality", String(result.quality));
                 if (result.timings) {
                     headers.set(
