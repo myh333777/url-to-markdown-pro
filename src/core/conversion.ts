@@ -3,10 +3,7 @@
  * Extracted from main.ts for reuse in MCP tools
  */
 
-import {
-    generateJsonData,
-    generateMarkdownText,
-} from "../html-to-markdown.ts";
+import { generateMarkdownText } from "../html-to-markdown.ts";
 import {
     fetchHtmlWithStrategies,
     type FetchResponse,
@@ -14,10 +11,18 @@ import {
 import type { Strategy } from "../strategies/mod.ts";
 import { supportsWreqUrl } from "../strategies/site-router.ts";
 import { extractFromJsonLd } from "../jsonld.ts";
+import {
+    discoverPublisherMetadata,
+    extractArticleMetadataFromHtml,
+    extractArticleMetadataFromMarkdown,
+    mergeArticleImages,
+    type ArticleImages,
+    type ArticleMetadata,
+} from "../article-metadata.ts";
+import { resolveKnownShortLink } from "../url-resolver.ts";
 
 // ============== URL Cache (DISABLED) ==============
 // Cache is disabled per user request
-const urlCache = new Map<string, { data: CacheEntry; timestamp: number }>();
 const inFlightConversions = new Map<string, Promise<ConversionResult>>();
 
 export interface CacheEntry {
@@ -25,6 +30,9 @@ export interface CacheEntry {
     strategy: string;
     contentType: string;
     title?: string;
+    author?: string;
+    publishedAt?: string;
+    images?: ArticleImages;
 }
 
 export function getCached(_url: string): CacheEntry | null {
@@ -57,12 +65,63 @@ export interface ConversionResult {
     elapsed: number;
     fromCache: boolean;
     title?: string;
+    author?: string;
+    publishedAt?: string;
+    images?: ArticleImages;
     resolvedUrl?: string;
     quality?: number;
     timings?: {
         fetch: number;
         extract: number;
         total: number;
+    };
+}
+
+function withHeroImage(markdown: string, images: ArticleImages, preserveImages: boolean): string {
+    if (!preserveImages || !images.hero) return markdown;
+    if (/!\[[^\]]*\]\([^)]+\)/.test(markdown)) return markdown;
+
+    const lines = markdown.split("\n");
+    let insertAt = 0;
+    if (lines[0]?.startsWith("# ")) insertAt = 1;
+    while (insertAt < lines.length && lines[insertAt].trim() === "") insertAt += 1;
+    if (/^\*By\s+/i.test(lines[insertAt] || "")) insertAt += 1;
+    while (insertAt < lines.length && lines[insertAt].trim() === "") insertAt += 1;
+    lines.splice(insertAt, 0, `![Article image](${images.hero})`, "");
+    return lines.join("\n");
+}
+
+function toJsonContent(
+    originalUrl: string,
+    resolvedUrl: string,
+    markdown: string,
+    strategy: string,
+    metadata: ArticleMetadata,
+): string {
+    return JSON.stringify({
+        url: originalUrl,
+        resolvedUrl,
+        title: metadata.title || "Extracted Content",
+        author: metadata.author || "",
+        publishedAt: metadata.publishedAt || "",
+        content: markdown,
+        strategy,
+        images: metadata.images,
+    }, null, 2);
+}
+
+async function recoverMissingImageMetadata(
+    metadata: ArticleMetadata,
+    sourceUrl: string,
+    preserveImages: boolean,
+): Promise<ArticleMetadata> {
+    if (!preserveImages || metadata.images.hero) return metadata;
+    const fallback = await discoverPublisherMetadata(sourceUrl);
+    return {
+        title: metadata.title || fallback.title,
+        author: metadata.author || fallback.author,
+        publishedAt: metadata.publishedAt || fallback.publishedAt,
+        images: mergeArticleImages(metadata.images, fallback.images),
     };
 }
 
@@ -146,6 +205,7 @@ class ContentQualityError extends Error {
 }
 
 async function convertFetchedContent(
+    originalUrl: string,
     sourceUrl: string,
     fetchResult: FetchResponse,
     options: ConversionOptions,
@@ -153,31 +213,37 @@ async function convertFetchedContent(
     const { preserveImages, jsonFormat } = options;
 
     if (fetchResult.markdown) {
-        const quality = requireQuality(fetchResult.markdown);
+        const metadata = await recoverMissingImageMetadata(
+            extractArticleMetadataFromMarkdown(fetchResult.markdown, sourceUrl),
+            sourceUrl,
+            preserveImages,
+        );
+        const markdown = withHeroImage(fetchResult.markdown, metadata.images, preserveImages);
+        const quality = requireQuality(markdown);
         if (jsonFormat) {
-            const jsonData = {
-                url: sourceUrl,
-                title: "Extracted Content",
-                date: new Date().toISOString(),
-                content: fetchResult.markdown,
-                strategy: fetchResult.strategy,
-                elapsed: fetchResult.elapsed,
-            };
             return {
                 quality,
                 result: {
-                    content: JSON.stringify(jsonData, null, 2),
+                    content: toJsonContent(originalUrl, sourceUrl, markdown, fetchResult.strategy, metadata),
                     strategy: fetchResult.strategy,
                     contentType: "application/json",
+                    title: metadata.title || fetchResult.title || "Extracted Content",
+                    author: metadata.author,
+                    publishedAt: metadata.publishedAt,
+                    images: metadata.images,
                 },
             };
         }
         return {
             quality,
             result: {
-                content: fetchResult.markdown,
+                content: markdown,
                 strategy: fetchResult.strategy,
                 contentType: "text/plain; charset=utf-8",
+                title: metadata.title || fetchResult.title || undefined,
+                author: metadata.author || undefined,
+                publishedAt: metadata.publishedAt || undefined,
+                images: metadata.images,
             },
         };
     }
@@ -186,30 +252,38 @@ async function convertFetchedContent(
         throw new ContentQualityError("No content received from fetch");
     }
 
+    const metadata = await recoverMissingImageMetadata(
+        extractArticleMetadataFromHtml(fetchResult.html, sourceUrl),
+        sourceUrl,
+        preserveImages,
+    );
     const jsonLd = extractFromJsonLd(fetchResult.html);
     if (jsonLd && jsonLd.content.length > 500) {
         console.log(`[JSON-LD] Using structured data for: ${sourceUrl}`);
         let markdown = `# ${jsonLd.title}\n\n`;
         if (jsonLd.author) markdown += `*By ${jsonLd.author}*\n\n`;
         markdown += jsonLd.content;
+        markdown = withHeroImage(markdown, metadata.images, preserveImages);
         const quality = requireQuality(markdown);
 
+        const enrichedMetadata: ArticleMetadata = {
+            title: jsonLd.title || metadata.title,
+            author: jsonLd.author || metadata.author,
+            publishedAt: jsonLd.date || metadata.publishedAt,
+            images: metadata.images,
+        };
+
         if (jsonFormat) {
-            const jsonData = {
-                url: sourceUrl,
-                title: jsonLd.title,
-                date: jsonLd.date || new Date().toISOString(),
-                content: markdown,
-                strategy: fetchResult.strategy,
-                author: jsonLd.author,
-            };
             return {
                 quality,
                 result: {
-                    content: JSON.stringify(jsonData, null, 2),
+                    content: toJsonContent(originalUrl, sourceUrl, markdown, fetchResult.strategy, enrichedMetadata),
                     strategy: fetchResult.strategy,
                     contentType: "application/json",
                     title: jsonLd.title,
+                    author: enrichedMetadata.author || undefined,
+                    publishedAt: enrichedMetadata.publishedAt || undefined,
+                    images: metadata.images,
                 },
             };
         }
@@ -221,38 +295,42 @@ async function convertFetchedContent(
                 strategy: fetchResult.strategy,
                 contentType: "text/plain; charset=utf-8",
                 title: jsonLd.title,
+                author: enrichedMetadata.author || undefined,
+                publishedAt: enrichedMetadata.publishedAt || undefined,
+                images: metadata.images,
             },
         };
     }
 
+    let markdown = generateMarkdownText(fetchResult.html, preserveImages, sourceUrl);
+    markdown = withHeroImage(markdown, metadata.images, preserveImages);
+    const quality = requireQuality(markdown);
+
     if (jsonFormat) {
-        const jsonContent = generateJsonData(
-            fetchResult.html,
-            sourceUrl,
-            fetchResult.strategy,
-            preserveImages,
-        );
-        const parsed = JSON.parse(jsonContent);
-        const quality = requireQuality(String(parsed.content || ""));
         return {
             quality,
             result: {
-                content: jsonContent,
+                content: toJsonContent(originalUrl, sourceUrl, markdown, fetchResult.strategy, metadata),
                 strategy: fetchResult.strategy,
                 contentType: "application/json",
-                title: parsed.title,
+                title: metadata.title || undefined,
+                author: metadata.author || undefined,
+                publishedAt: metadata.publishedAt || undefined,
+                images: metadata.images,
             },
         };
     }
 
-    const markdown = generateMarkdownText(fetchResult.html, preserveImages, sourceUrl);
-    const quality = requireQuality(markdown);
     return {
         quality,
         result: {
             content: markdown,
             strategy: fetchResult.strategy,
             contentType: "text/plain; charset=utf-8",
+            title: metadata.title || undefined,
+            author: metadata.author || undefined,
+            publishedAt: metadata.publishedAt || undefined,
+            images: metadata.images,
         },
     };
 }
@@ -262,7 +340,7 @@ async function convertFetchedContent(
  */
 async function performConversion(url: string, options: ConversionOptions): Promise<ConversionResult> {
     const startTime = Date.now();
-    const { bypass, preserveImages, strategy, jsonFormat, useCache } = options;
+    const { bypass, strategy, useCache } = options;
 
     // Check cache first
     if (useCache) {
@@ -276,12 +354,21 @@ async function performConversion(url: string, options: ConversionOptions): Promi
         }
     }
 
+    // Resolve known short-link wrappers before the expensive strategy cascade.
+    // This is especially important for dlvr.it / reut.rs / t.co style feeds:
+    // the wrapper can be fetchable while the actual publisher requires a
+    // completely different route and carries the useful article metadata.
+    const resolvedInputUrl = await resolveKnownShortLink(url);
+
     // Fetch content with strategies
     const fetchStartedAt = Date.now();
-    let fetchResult = await fetchHtmlWithStrategies(url, {
+    let fetchResult = await fetchHtmlWithStrategies(resolvedInputUrl, {
         bypass,
         strategy,
     });
+    if (!fetchResult.resolvedUrl && resolvedInputUrl !== url) {
+        fetchResult.resolvedUrl = resolvedInputUrl;
+    }
     let fetchElapsed = Date.now() - fetchStartedAt;
 
     if (!fetchResult.success) {
@@ -295,14 +382,14 @@ async function performConversion(url: string, options: ConversionOptions): Promi
     ): Promise<{ result: CacheEntry; quality: number }> => {
         const startedAt = Date.now();
         try {
-            return await convertFetchedContent(sourceUrl, candidate, options);
+            return await convertFetchedContent(url, sourceUrl, candidate, options);
         } finally {
             extractElapsed += Date.now() - startedAt;
         }
     };
     let converted: { result: CacheEntry; quality: number };
     try {
-        converted = await convertTimed(url, fetchResult);
+        converted = await convertTimed(fetchResult.resolvedUrl || resolvedInputUrl, fetchResult);
     } catch (error) {
         const strategyValue = strategy as string | undefined;
         const explicitStrategy = Boolean(
@@ -310,7 +397,7 @@ async function performConversion(url: string, options: ConversionOptions): Promi
         );
         if (!(error instanceof ContentQualityError) || explicitStrategy) throw error;
 
-        const rescueUrl = fetchResult.resolvedUrl || url;
+        const rescueUrl = fetchResult.resolvedUrl || resolvedInputUrl;
         let rescued: { result: CacheEntry; quality: number } | null = null;
         const rescueStrategies: Strategy[] = supportsWreqUrl(rescueUrl)
             ? ["wreq", "jina", "exa"]
@@ -324,7 +411,7 @@ async function performConversion(url: string, options: ConversionOptions): Promi
             });
             fetchElapsed += Date.now() - rescueStartedAt;
             if (!candidate.success) continue;
-            candidate.resolvedUrl = fetchResult.resolvedUrl;
+            candidate.resolvedUrl = candidate.resolvedUrl || fetchResult.resolvedUrl || resolvedInputUrl;
             try {
                 rescued = await convertTimed(rescueUrl, candidate);
                 fetchResult = candidate;
@@ -348,7 +435,7 @@ async function performConversion(url: string, options: ConversionOptions): Promi
         ...result,
         elapsed: Date.now() - startTime,
         fromCache: false,
-        resolvedUrl: fetchResult.resolvedUrl,
+        resolvedUrl: fetchResult.resolvedUrl || resolvedInputUrl,
         quality,
         timings: {
             fetch: fetchElapsed,

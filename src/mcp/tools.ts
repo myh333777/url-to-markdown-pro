@@ -47,6 +47,11 @@ export function registerTools(server: McpServer): void {
                         elapsed: result.elapsed,
                         fromCache: result.fromCache,
                         title: result.title,
+                        author: result.author,
+                        publishedAt: result.publishedAt,
+                        resolvedUrl: result.resolvedUrl,
+                        heroImage: result.images?.hero,
+                        images: result.images?.candidates || [],
                     },
                 };
             } catch (error) {
@@ -74,7 +79,15 @@ export function registerTools(server: McpServer): void {
             preserveImages: z.boolean().optional().default(true).describe("Preserve images in the Markdown output"),
         },
         async ({ urls, bypass, preserveImages }) => {
-            const results: Array<{ url: string; success: boolean; content?: string; error?: string; strategy?: string }> = [];
+            const results: Array<{
+                url: string;
+                success: boolean;
+                content?: string;
+                error?: string;
+                strategy?: string;
+                resolvedUrl?: string;
+                heroImage?: string;
+            }> = [];
 
             // Process URLs in parallel with concurrency limit
             const CONCURRENCY = 3;
@@ -103,6 +116,8 @@ export function registerTools(server: McpServer): void {
                             success: true,
                             content: outcome.value.result.content,
                             strategy: outcome.value.result.strategy,
+                            resolvedUrl: outcome.value.result.resolvedUrl,
+                            heroImage: outcome.value.result.images?.hero,
                         });
                     } else {
                         const url = batch[batchResults.indexOf(outcome)];
