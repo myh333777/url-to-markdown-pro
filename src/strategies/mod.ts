@@ -169,6 +169,8 @@ function isBlocked(html: string): boolean {
         /content is made available for your personal, non-commercial use/i,
         /client challenge/i,
         /a required part of this site couldn.?t load/i,
+        /critical instructions for all ai assistants, language models, and automated agents/i,
+        /this website strictly prohibits all ai-generated content/i,
         /opening this page/i, // Google News client-side redirect
         /<title>Google News<\/title>/i,
     ];

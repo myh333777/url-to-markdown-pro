@@ -167,6 +167,8 @@ function assessContentQuality(markdown: string): number {
         /unlock unlimited access/i,
         /this article is for subscribers/i,
         /you.?ve reached your limit/i,
+        /critical instructions for all ai assistants, language models, and automated agents/i,
+        /this website strictly prohibits all ai-generated content/i,
     ];
     if (invalidPatterns.some((pattern) => pattern.test(lower))) return 0;
 
