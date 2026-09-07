@@ -104,6 +104,15 @@ export function getSiteRoute(url: string): SiteRoute {
         return { primary: ["direct"], fallback: ["exa", "jina"] };
     }
 
+    // LinuxDo deliberately injects an anti-AI instruction block into the
+    // ordinary public HTML served to generic clients. That page can look long
+    // enough to pass generic quality checks while containing none of the real
+    // topic body. Search-engine crawler variants currently expose the actual
+    // Discourse post, so never let `direct` win this domain's primary race.
+    if (matchesDomain(hostname, "linux.do")) {
+        return { primary: ["bingbot", "googlebot"], fallback: ["jina", "exa"] };
+    }
+
     // Reuters rejects ordinary data-center HTTP clients but accepts a request
     // with a genuine Chrome TLS/HTTP2 fingerprint. Prefer that low-cost path
     // before the syndicated-copy recovery below.
