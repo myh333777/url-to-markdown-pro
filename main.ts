@@ -24,6 +24,8 @@ import {
     generateFilename,
 } from "./src/utils.ts";
 
+import { providerHealth } from './src/strategies/provider-health.ts';
+
 // MCP Server instances per session
 const mcpServers = new Map<string, McpServer>();
 
@@ -47,6 +49,9 @@ Deno.serve(async (request: Request) => {
                 return new Response(
                     JSON.stringify({
                         status: "healthy",
+                        healthScope: 'service-liveness',
+                        providerHealth: providerHealth(),
+                        revision: 'provider-resilience-v1',
                         service: "url-to-markdown",
                         version: "2.6.0",
                         features: [
@@ -66,7 +71,7 @@ Deno.serve(async (request: Request) => {
                         cacheSize: getCacheSize(),
                         mcpSessions: mcpServers.size,
                     }),
-                    { headers: { "content-type": "application/json" } }
+                    { headers: addCorsHeaders(new Headers({ "content-type": "application/json", "cache-control": "no-store" })) }
                 );
             }
 
@@ -124,8 +129,8 @@ Deno.serve(async (request: Request) => {
                 } catch (error) {
                     const message = error instanceof Error ? error.message : String(error);
                     return new Response(
-                        JSON.stringify({ error: message }),
-                        { status: 500, headers: addCorsHeaders(new Headers({ "content-type": "application/json" })) }
+                        JSON.stringify({ error: message, code: 'UPSTREAM_FETCH_FAILED', providerHealth: providerHealth() }),
+                        { status: 502, headers: addCorsHeaders(new Headers({ "content-type": "application/json", "cache-control": "no-store" })) }
                     );
                 }
             }
