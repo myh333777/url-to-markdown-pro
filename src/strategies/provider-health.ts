@@ -8,14 +8,18 @@ export function configuredJinaKey(): string {
 }
 export function retryDelay(value: string | null, now = Date.now()): number {
   const seconds = value && /^\d+$/.test(value.trim()) ? Number(value) : NaN;
-  const date = value ? Date.parse(value) : NaN;
+  const httpDate = /^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \d{2}-[A-Z][a-z]{2}-\d{2} \d{2}:\d{2}:\d{2} GMT|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) [A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \d{4})$/;
+  const date = value && httpDate.test(value.trim()) ? Date.parse(value) : NaN;
   const requested = Number.isFinite(seconds) ? seconds * 1000 : Number.isFinite(date) ? date - now : 300000;
   return Math.max(30000, Math.min(3600000, requested));
 }
 export function noteProviderResponse(provider: Provider, response: Response): void {
   const now = Date.now();
   const cooldown = response.status === 429 ? retryDelay(response.headers.get('retry-after'), now)
-    : [401, 402, 403].includes(response.status) ? 300000 : 0;
+    : [401, 402, 403].includes(response.status) ? 300000 : response.status >= 500 ? 60000 : 0;
+  const prior = observations.get(provider);
+  // Concurrent responses cannot shorten a cooldown set by an earlier failure.
+  if (prior && prior.until > now && prior.until >= now + cooldown) return;
   observations.set(provider, { status: response.status, at: now, until: now + cooldown });
 }
 export function providerCooldown(provider: Provider): string | null {
@@ -30,7 +34,7 @@ export function providerHealth(): Record<Provider, { state: string; lastStatus: 
     const row = observations.get(provider);
     const retryAfterSeconds = Math.max(0, Math.ceil(((row?.until || 0) - Date.now()) / 1000));
     result[provider] = {
-      state: !row ? 'not_tested' : retryAfterSeconds ? (row.status === 429 ? 'rate_limited' : 'auth_required')
+      state: !row ? 'not_tested' : retryAfterSeconds ? (row.status === 429 ? 'rate_limited' : row.status >= 500 ? 'temporarily_unavailable' : 'auth_required')
         : row.status >= 200 && row.status < 300 ? 'last_request_ok' : 'retry_available',
       lastStatus: row?.status ?? null, retryAfterSeconds,
       ...(provider === 'jina' ? { authenticated: Boolean(configuredJinaKey()) } : {}),

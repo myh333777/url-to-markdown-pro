@@ -66,6 +66,7 @@ export async function fetchWithJina(url: string, signal?: AbortSignal): Promise<
         };
     } catch (error) {
         signal?.throwIfAborted();
+        noteProviderResponse('jina', new Response(null, { status: 503 }));
         return {
             success: false,
             error: error instanceof Error ? error.message : String(error),

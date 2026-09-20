@@ -11,11 +11,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.7.7
       - name: Typecheck entrypoint
         run: deno check --allow-import=cdn.skypack.dev,deno.land,esm.sh main.ts
       - name: Isolated provider and content regression
-        run: env -u JINA_API_KEY deno test --allow-import=cdn.skypack.dev,deno.land,esm.sh --allow-read --allow-env=JINA_API_KEY src/article-metadata_test.ts src/strategies/site-router_test.ts src/strategies/provider-health_test.ts
-      - run: git diff --check
+        run: env -u JINA_API_KEY deno test --allow-import=cdn.skypack.dev,deno.land,esm.sh --allow-read --allow-env=JINA_API_KEY src/article-metadata_test.ts src/strategies/site-router_test.ts src/strategies/provider-health_test.ts src/core/conversion-error_test.ts
+      - run: git diff --check HEAD^ HEAD

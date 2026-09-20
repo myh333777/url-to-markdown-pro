@@ -1,6 +1,6 @@
 import { fetchWithJina } from './jina.ts';
 import { fetchFromArchive } from './archive.ts';
-import { providerHealth, resetProviderObservations, retryDelay } from './provider-health.ts';
+import { providerHealth, resetProviderObservations, retryDelay, noteProviderResponse } from './provider-health.ts';
 function assert(value: unknown, message = 'assertion failed'): asserts value { if (!value) throw new Error(message); }
 Deno.test('Jina 401 is classified and does not retry on the next article', async () => {
   const original = globalThis.fetch; let calls = 0; resetProviderObservations();
@@ -44,9 +44,29 @@ Deno.test('Archive abort propagates instead of returning a successful fallback',
   catch (error) { cancelled = error instanceof DOMException && error.name === 'AbortError'; }
   assert(cancelled);
 });
+Deno.test('concurrent success and shorter limits do not erase an active cooldown', () => {
+  resetProviderObservations();
+  noteProviderResponse('archive', new Response(null, { status: 429, headers: { 'Retry-After': '1800' } }));
+  noteProviderResponse('archive', new Response(null, { status: 200 }));
+  noteProviderResponse('archive', new Response(null, { status: 429, headers: { 'Retry-After': '60' } }));
+  assert(providerHealth().archive.retryAfterSeconds > 1700);
+  assert(providerHealth().archive.state === 'rate_limited');
+  resetProviderObservations();
+});
+Deno.test('transport failures cool down without following redirects or repeated requests', async () => {
+  const original = globalThis.fetch; let calls = 0; resetProviderObservations();
+  globalThis.fetch = () => { calls++; return Promise.reject(new TypeError('network or redirect failure')); };
+  try {
+    assert(!(await fetchWithJina('https://example.org/a')).success);
+    assert((await fetchWithJina('https://example.org/b')).error?.includes('cooldown'));
+    assert(calls === 1 && providerHealth().jina.state === 'temporarily_unavailable');
+  } finally { globalThis.fetch = original; resetProviderObservations(); }
+});
 Deno.test('Retry-After accepts dates and clamps corrupt or extreme values', () => {
   const now = Date.parse('2026-09-20T00:00:00Z');
   assert(retryDelay('Sun, 20 Sep 2026 00:02:00 GMT', now) === 120000);
   assert(retryDelay('bad', now) === 300000);
+  assert(retryDelay('1.5', now) === 300000);
+  assert(retryDelay('2026-09-21', now) === 300000);
   assert(retryDelay('9999999', now) === 3600000);
 });
