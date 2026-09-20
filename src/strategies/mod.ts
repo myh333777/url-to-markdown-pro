@@ -501,7 +501,7 @@ async function executeStrategy(
         case "google-referer":
             return await fetchWithGoogleReferer(url, signal);
         case "archive":
-            return await fetchFromArchive(url);
+            return await fetchFromArchive(url, signal);
         case "12ft":
             return await fetchWith12ft(url);
         case "jina": {

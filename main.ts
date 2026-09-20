@@ -24,6 +24,10 @@ import {
     generateFilename,
 } from "./src/utils.ts";
 
+import { providerHealth } from './src/strategies/provider-health.ts';
+
+import { classifyConversionError, validateArticleUrl } from './src/core/conversion-error.ts';
+
 // MCP Server instances per session
 const mcpServers = new Map<string, McpServer>();
 
@@ -47,6 +51,9 @@ Deno.serve(async (request: Request) => {
                 return new Response(
                     JSON.stringify({
                         status: "healthy",
+                        healthScope: 'service-liveness',
+                        providerHealth: providerHealth(),
+                        revision: 'provider-resilience-v1',
                         service: "url-to-markdown",
                         version: "2.6.0",
                         features: [
@@ -66,7 +73,7 @@ Deno.serve(async (request: Request) => {
                         cacheSize: getCacheSize(),
                         mcpSessions: mcpServers.size,
                     }),
-                    { headers: { "content-type": "application/json" } }
+                    { headers: addCorsHeaders(new Headers({ "content-type": "application/json", "cache-control": "no-store" })) }
                 );
             }
 
@@ -100,6 +107,7 @@ Deno.serve(async (request: Request) => {
                 }
 
                 try {
+                    validateArticleUrl(targetUrl);
                     const options = parseQueryOptions(url.searchParams);
                     const result = await handleConversion(targetUrl, options);
                     const headers = new Headers({ "content-type": result.contentType });
@@ -123,9 +131,10 @@ Deno.serve(async (request: Request) => {
                     return new Response(result.content, { headers });
                 } catch (error) {
                     const message = error instanceof Error ? error.message : String(error);
+                    const failure = classifyConversionError(error);
                     return new Response(
-                        JSON.stringify({ error: message }),
-                        { status: 500, headers: addCorsHeaders(new Headers({ "content-type": "application/json" })) }
+                        JSON.stringify({ error: message, code: failure.code, providerHealth: providerHealth() }),
+                        { status: failure.status, headers: addCorsHeaders(new Headers({ "content-type": "application/json", "cache-control": "no-store" })) }
                     );
                 }
             }
